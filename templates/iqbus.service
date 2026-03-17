@@ -1,0 +1,27 @@
+[Unit]
+Description=IQ bus (rtl_sdr -> nmux fanout)
+After=network.target
+Wants=network.target
+
+[Service]
+user=iqbus
+Type=simple
+
+# Adjust these to taste:
+# -s is the sample rate (default 960k)
+# -f is center frequency (162.475 MHZ for NOAA Weather Radio)
+# -g is gain (or use -g 0 for auto on some setups)
+# The network stream is zstd compressed to save bandwidth
+# nmux listens on localhost TCP port 7355
+#
+ExecStart=/bin/sh -lc 'exec rtl_sdr -s 960000 -f 162475000 -g 60 - | exec nmux -a 0.0.0.0 -p 7355 -b 262144 -n 32'
+Restart=always
+KillMode=control-group
+RestartSec=1
+
+# Nice-to-have hardening (won’t break pipes)
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

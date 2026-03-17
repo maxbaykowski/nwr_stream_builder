@@ -1,0 +1,19 @@
+[Unit]
+Description=<CALLSIGN123> NOAA Weather Radio stream
+After=network-online.target
+after=iqbus.service
+Wants=network-online.target
+requires=iqbus.service
+[Service]
+Type=simple
+User=<callsign123>
+StateDirectory=easrecorder/<callsign123>
+UMask=0022
+ExecStart=/usr/local/bin/<callsign>.liq
+Restart=always
+RestartSec=5
+KillMode=control-group
+KillSignal=SIGKILL
+
+[Install]
+WantedBy=multi-user.target
