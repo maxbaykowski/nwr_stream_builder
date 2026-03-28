@@ -38,6 +38,7 @@ LOW_SAMPLE_RATE_MIN = 225001
 LOW_SAMPLE_RATE_MAX = 300000
 HIGH_SAMPLE_RATE_MIN = 900001
 HIGH_SAMPLE_RATE_MAX = 3200000
+USB_WARNING_SAMPLE_RATE = 2560000
 
 
 @dataclass
@@ -342,7 +343,6 @@ def prompt_for_sample_rate(current_value: int | None) -> int:
             f"{LOW_SAMPLE_RATE_MIN}-{LOW_SAMPLE_RATE_MAX} or "
             f"{HIGH_SAMPLE_RATE_MIN}-{HIGH_SAMPLE_RATE_MAX} samples/second."
         )
-        print("Rates above 2560000 may drop samples on USB.")
 
         prefill = str(current_value) if current_value is not None else ""
         value = prompt_with_prefill("Enter a new sample rate: ", prefill).strip()
@@ -357,6 +357,23 @@ def prompt_for_sample_rate(current_value: int | None) -> int:
         print("That sample rate is outside the supported RTL-SDR ranges.")
 
 
+def confirm_high_sample_rate(sample_rate: int) -> bool:
+    if sample_rate <= USB_WARNING_SAMPLE_RATE:
+        return True
+
+    while True:
+        response = input(
+            "Warning: going above 2560000 samples/second may result in dropped "
+            "samples over USB. Are you sure? (Y/n): "
+        ).strip().lower()
+        if response in ("", "y", "yes"):
+            return True
+        if response in ("n", "no"):
+            return False
+
+        print("Enter y to continue or n to cancel.")
+
+
 def configure_sample_rate() -> None:
     ensure_group_exists(IQBUS_GROUP)
     ensure_user_exists(IQBUS_USER)
@@ -367,6 +384,11 @@ def configure_sample_rate() -> None:
     current_sample_rate = int(current_value) if current_value and current_value.isdigit() else None
 
     sample_rate = prompt_for_sample_rate(current_sample_rate)
+    if not confirm_high_sample_rate(sample_rate):
+        print()
+        print("Sample rate was not changed.")
+        return
+
     updated_config = update_config_value(config_text, "band_sampling_rate", str(sample_rate))
     write_iqbus_config(updated_config)
     restart_iqbus_if_active()
