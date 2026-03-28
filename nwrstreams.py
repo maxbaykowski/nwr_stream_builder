@@ -39,6 +39,8 @@ LOW_SAMPLE_RATE_MAX = 300000
 HIGH_SAMPLE_RATE_MIN = 900001
 HIGH_SAMPLE_RATE_MAX = 3200000
 USB_WARNING_SAMPLE_RATE = 2560000
+MIN_MANUAL_GAIN = 0.0
+MAX_MANUAL_GAIN = 49.6
 
 
 @dataclass
@@ -324,6 +326,22 @@ def get_config_value(config_text: str, key: str) -> str | None:
     return None
 
 
+def ensure_iqbus_identity() -> None:
+    ensure_group_exists(IQBUS_GROUP)
+    ensure_user_exists(IQBUS_USER)
+    ensure_user_in_group(IQBUS_USER, IQBUS_GROUP)
+
+
+def write_config_and_restart(config_text: str) -> None:
+    ensure_iqbus_identity()
+    write_iqbus_config(config_text)
+    restart_iqbus_if_active()
+
+
+def gain_mode_is_hardware_agc(config_text: str) -> bool:
+    return get_config_value(config_text, "gain_mode") == "0"
+
+
 def is_valid_sample_rate(value: int) -> bool:
     return (
         LOW_SAMPLE_RATE_MIN <= value <= LOW_SAMPLE_RATE_MAX
@@ -375,10 +393,6 @@ def confirm_high_sample_rate(sample_rate: int) -> bool:
 
 
 def configure_sample_rate() -> None:
-    ensure_group_exists(IQBUS_GROUP)
-    ensure_user_exists(IQBUS_USER)
-    ensure_user_in_group(IQBUS_USER, IQBUS_GROUP)
-
     config_text = read_iqbus_config()
     current_value = get_config_value(config_text, "band_sampling_rate")
     current_sample_rate = int(current_value) if current_value and current_value.isdigit() else None
@@ -390,26 +404,86 @@ def configure_sample_rate() -> None:
         return
 
     updated_config = update_config_value(config_text, "band_sampling_rate", str(sample_rate))
-    write_iqbus_config(updated_config)
-    restart_iqbus_if_active()
+    write_config_and_restart(updated_config)
 
     print()
     print(f"RTL sample rate set to {sample_rate}.")
 
 
+def toggle_hardware_agc() -> None:
+    config_text = read_iqbus_config()
+    agc_enabled = gain_mode_is_hardware_agc(config_text)
+    updated_config = update_config_value(config_text, "gain_mode", "1" if agc_enabled else "0")
+    write_config_and_restart(updated_config)
+
+    print()
+    print(f"Hardware AGC is now {'on' if not agc_enabled else 'off'}.")
+
+
+def prompt_for_manual_gain(current_value: float | None) -> float:
+    while True:
+        print()
+        print("Manual Gain")
+        print("Controls the tuner gain when hardware AGC is off.")
+        if current_value is not None:
+            print(f"Current value: {current_value:.1f} dB")
+        print(f"Valid range: {MIN_MANUAL_GAIN:.1f}-{MAX_MANUAL_GAIN:.1f} dB.")
+
+        prefill = f"{current_value:.1f}" if current_value is not None else ""
+        value = prompt_with_prefill("Enter a new manual gain in dB: ", prefill).strip()
+        try:
+            gain = float(value)
+        except ValueError:
+            print("Enter the gain as a number, for example 45.0.")
+            continue
+
+        if MIN_MANUAL_GAIN <= gain <= MAX_MANUAL_GAIN:
+            return gain
+
+        print("That gain is outside the supported RTL-SDR range.")
+
+
+def configure_manual_gain() -> None:
+    config_text = read_iqbus_config()
+    if gain_mode_is_hardware_agc(config_text):
+        print()
+        print("Manual gain is unavailable while Hardware AGC is on.")
+        return
+
+    current_value = get_config_value(config_text, "gain")
+    try:
+        current_gain = float(current_value) if current_value is not None else None
+    except ValueError:
+        current_gain = None
+
+    gain = prompt_for_manual_gain(current_gain)
+    updated_config = update_config_value(config_text, "gain", f"{gain:.1f}")
+    write_config_and_restart(updated_config)
+
+    print()
+    print(f"Manual gain set to {gain:.1f} dB.")
+
+
 def server_settings_menu() -> None:
     while True:
         config_text = read_iqbus_config()
-        current_value = get_config_value(config_text, "band_sampling_rate") or "unknown"
+        current_sample_rate = get_config_value(config_text, "band_sampling_rate") or "unknown"
+        agc_enabled = gain_mode_is_hardware_agc(config_text)
+        options = [
+            (
+                "RTL Sample Rate: "
+                f"{current_sample_rate} samples/second "
+                "(controls the SDR band sampling rate)"
+            ),
+            f"Hardware AGC: {'on' if agc_enabled else 'off'} (toggles tuner automatic gain control)",
+        ]
+        if not agc_enabled:
+            current_gain = get_config_value(config_text, "gain") or "unknown"
+            options.append(f"Manual Gain: {current_gain} dB (sets tuner gain when Hardware AGC is off)")
+
         selection = prompt_menu_with_back(
             "Server Configuration",
-            [
-                (
-                    "RTL Sample Rate: "
-                    f"{current_value} samples/second "
-                    "(controls the SDR band sampling rate)"
-                ),
-            ],
+            options,
             "Back to main menu",
         )
 
@@ -418,6 +492,10 @@ def server_settings_menu() -> None:
 
         if selection == 0:
             configure_sample_rate()
+        elif selection == 1:
+            toggle_hardware_agc()
+        elif selection == 2:
+            configure_manual_gain()
 
 
 def configure_server() -> None:
