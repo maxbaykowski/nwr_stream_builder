@@ -33,6 +33,10 @@ IQBUS_CONFIG_PATH = Path("/etc/iqbus.config")
 IQBUS_SERVICE_PATH = Path("/etc/systemd/system/iqbus.service")
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = BASE_DIR / "templates"
+LOW_SAMPLE_RATE_MIN = 225001
+LOW_SAMPLE_RATE_MAX = 300000
+HIGH_SAMPLE_RATE_MIN = 900001
+HIGH_SAMPLE_RATE_MAX = 3200000
 
 
 @dataclass
@@ -94,6 +98,28 @@ def prompt_menu(title: str, options: list[str]) -> int:
             continue
 
         selected_index = int(selection)
+        if 1 <= selected_index <= len(options):
+            return selected_index - 1
+
+        print("That selection is not available.")
+
+
+def prompt_menu_with_back(title: str, options: list[str], back_label: str) -> int:
+    while True:
+        print()
+        print(title)
+        print(f"0. {back_label}")
+        for index, option in enumerate(options, start=1):
+            print(f"{index}. {option}")
+
+        selection = input("Select an option: ").strip()
+        if not selection.isdigit():
+            print("Enter the number for the option you want.")
+            continue
+
+        selected_index = int(selection)
+        if selected_index == 0:
+            return -1
         if 1 <= selected_index <= len(options):
             return selected_index - 1
 
@@ -268,7 +294,105 @@ def reload_and_enable_service() -> None:
     run_command(["systemctl", "enable", "--now", "iqbus.service"])
 
 
+def restart_iqbus_if_active() -> None:
+    result = run_command(["systemctl", "is-active", "--quiet", "iqbus.service"], check=False)
+    if result.returncode == 0:
+        run_command(["systemctl", "restart", "iqbus.service"])
+
+
+def read_iqbus_config() -> str:
+    try:
+        return IQBUS_CONFIG_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError as error:
+        raise SetupError(f"Existing config not found: {IQBUS_CONFIG_PATH}") from error
+
+
+def get_config_value(config_text: str, key: str) -> str | None:
+    match = re.search(rf"^{re.escape(key)}=(.+)$", config_text, re.MULTILINE)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def is_valid_sample_rate(value: int) -> bool:
+    return (
+        LOW_SAMPLE_RATE_MIN <= value <= LOW_SAMPLE_RATE_MAX
+        or HIGH_SAMPLE_RATE_MIN <= value <= HIGH_SAMPLE_RATE_MAX
+    )
+
+
+def prompt_for_sample_rate(current_value: int | None) -> int:
+    while True:
+        print()
+        print("RTL Sample Rate")
+        print("Controls the SDR band sampling rate used by sdr_server.")
+        if current_value is not None:
+            print(f"Current value: {current_value}")
+        print(
+            "Valid ranges: "
+            f"{LOW_SAMPLE_RATE_MIN}-{LOW_SAMPLE_RATE_MAX} or "
+            f"{HIGH_SAMPLE_RATE_MIN}-{HIGH_SAMPLE_RATE_MAX} samples/second."
+        )
+        print("Rates above 2560000 may drop samples on USB.")
+
+        value = input("Enter a new sample rate: ").strip()
+        if not value.isdigit():
+            print("Enter the sample rate as a whole number.")
+            continue
+
+        sample_rate = int(value)
+        if is_valid_sample_rate(sample_rate):
+            return sample_rate
+
+        print("That sample rate is outside the supported RTL-SDR ranges.")
+
+
+def configure_sample_rate() -> None:
+    ensure_group_exists(IQBUS_GROUP)
+    ensure_user_exists(IQBUS_USER)
+    ensure_user_in_group(IQBUS_USER, IQBUS_GROUP)
+
+    config_text = read_iqbus_config()
+    current_value = get_config_value(config_text, "band_sampling_rate")
+    current_sample_rate = int(current_value) if current_value and current_value.isdigit() else None
+
+    sample_rate = prompt_for_sample_rate(current_sample_rate)
+    updated_config = update_config_value(config_text, "band_sampling_rate", str(sample_rate))
+    write_iqbus_config(updated_config)
+    restart_iqbus_if_active()
+
+    print()
+    print(f"RTL sample rate set to {sample_rate}.")
+
+
+def server_settings_menu() -> None:
+    while True:
+        config_text = read_iqbus_config()
+        current_value = get_config_value(config_text, "band_sampling_rate") or "unknown"
+        selection = prompt_menu_with_back(
+            "Server Configuration",
+            [
+                (
+                    "RTL Sample Rate: "
+                    f"{current_value} samples/second "
+                    "(controls the SDR band sampling rate)"
+                ),
+            ],
+            "Back to main menu",
+        )
+
+        if selection == -1:
+            return
+
+        if selection == 0:
+            configure_sample_rate()
+
+
 def configure_server() -> None:
+    if IQBUS_CONFIG_PATH.exists():
+        server_settings_menu()
+        return
+
     devices = list_rtl_devices()
     if not devices:
         print("No RTL-SDR devices were detected.")
