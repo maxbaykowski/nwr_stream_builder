@@ -193,7 +193,7 @@ def list_rtl_devices() -> list[RtlDevice]:
 
 def ensure_root() -> None:
     if os.geteuid() != 0:
-        raise SetupError("Server configuration must be run as root. Re-run this script with sudo.")
+        raise SetupError("You must run this program as root.")
 
 
 def ensure_group_exists(group_name: str) -> None:
@@ -269,8 +269,6 @@ def reload_and_enable_service() -> None:
 
 
 def configure_server() -> None:
-    ensure_root()
-
     devices = list_rtl_devices()
     if not devices:
         print("No RTL-SDR devices were detected.")
@@ -322,6 +320,12 @@ def main() -> int:
         print("Missing required dependencies:", file=sys.stderr)
         for dependency in missing:
             print(f"- {dependency}", file=sys.stderr)
+        return 1
+
+    try:
+        ensure_root()
+    except SetupError as error:
+        print(error, file=sys.stderr)
         return 1
 
     print("All dependencies are met.")
