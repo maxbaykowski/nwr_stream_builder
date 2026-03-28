@@ -41,6 +41,8 @@ HIGH_SAMPLE_RATE_MAX = 3200000
 USB_WARNING_SAMPLE_RATE = 2560000
 MIN_MANUAL_GAIN = 0.0
 MAX_MANUAL_GAIN = 49.6
+MIN_PPM = -100
+MAX_PPM = 100
 
 
 @dataclass
@@ -464,6 +466,45 @@ def configure_manual_gain() -> None:
     print(f"Manual gain set to {gain:.1f} dB.")
 
 
+def prompt_for_ppm(current_value: int | None) -> int:
+    while True:
+        print()
+        print("PPM Correction")
+        print("Adjusts tuner frequency correction for SDRs that drift off frequency.")
+        if current_value is not None:
+            print(f"Current value: {current_value} PPM")
+        print(f"Valid range: {MIN_PPM} to {MAX_PPM} PPM.")
+
+        prefill = str(current_value) if current_value is not None else ""
+        value = prompt_with_prefill("Enter a new PPM correction: ", prefill).strip()
+        try:
+            ppm = int(value)
+        except ValueError:
+            print("Enter the PPM correction as a whole number.")
+            continue
+
+        if MIN_PPM <= ppm <= MAX_PPM:
+            return ppm
+
+        print("That PPM correction is outside the allowed range.")
+
+
+def configure_ppm() -> None:
+    config_text = read_iqbus_config()
+    current_value = get_config_value(config_text, "ppm")
+    try:
+        current_ppm = int(current_value) if current_value is not None else None
+    except ValueError:
+        current_ppm = None
+
+    ppm = prompt_for_ppm(current_ppm)
+    updated_config = update_config_value(config_text, "ppm", str(ppm))
+    write_config_and_restart(updated_config)
+
+    print()
+    print(f"PPM correction set to {ppm}.")
+
+
 def server_settings_menu() -> None:
     while True:
         config_text = read_iqbus_config()
@@ -480,6 +521,8 @@ def server_settings_menu() -> None:
         if not agc_enabled:
             current_gain = get_config_value(config_text, "gain") or "unknown"
             options.append(f"Manual Gain: {current_gain} dB (sets tuner gain when Hardware AGC is off)")
+        current_ppm = get_config_value(config_text, "ppm") or "unknown"
+        options.append(f"PPM Correction: {current_ppm} PPM (adjusts tuner frequency correction)")
 
         selection = prompt_menu_with_back(
             "Server Configuration",
@@ -495,7 +538,12 @@ def server_settings_menu() -> None:
         elif selection == 1:
             toggle_hardware_agc()
         elif selection == 2:
-            configure_manual_gain()
+            if agc_enabled:
+                configure_ppm()
+            else:
+                configure_manual_gain()
+        elif selection == 3:
+            configure_ppm()
 
 
 def configure_server() -> None:
