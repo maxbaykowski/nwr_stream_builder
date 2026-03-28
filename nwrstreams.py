@@ -5,6 +5,7 @@ from __future__ import annotations
 import grp
 import os
 import pwd
+import readline
 import re
 import shutil
 import subprocess
@@ -124,6 +125,14 @@ def prompt_menu_with_back(title: str, options: list[str], back_label: str) -> in
             return selected_index - 1
 
         print("That selection is not available.")
+
+
+def prompt_with_prefill(prompt: str, prefill: str) -> str:
+    readline.set_startup_hook(lambda: readline.insert_text(prefill))
+    try:
+        return input(prompt)
+    finally:
+        readline.set_startup_hook(None)
 
 
 def load_template(name: str) -> str:
@@ -335,7 +344,8 @@ def prompt_for_sample_rate(current_value: int | None) -> int:
         )
         print("Rates above 2560000 may drop samples on USB.")
 
-        value = input("Enter a new sample rate: ").strip()
+        prefill = str(current_value) if current_value is not None else ""
+        value = prompt_with_prefill("Enter a new sample rate: ", prefill).strip()
         if not value.isdigit():
             print("Enter the sample rate as a whole number.")
             continue
