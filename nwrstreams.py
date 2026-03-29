@@ -532,10 +532,15 @@ def prompt_for_port(current_value: int | None) -> int:
             continue
 
         port = int(value)
-        if 1 <= port <= 65535:
-            return port
+        if not 1 <= port <= 65535:
+            print("That port is outside the valid TCP port range.")
+            continue
 
-        print("That port is outside the valid TCP port range.")
+        if port != current_value and not can_bind_port_on_all_interfaces(port):
+            print(f"Port {port} is already bound on 0.0.0.0 and cannot be used.")
+            continue
+
+        return port
 
 
 def configure_port() -> None:
@@ -544,11 +549,6 @@ def configure_port() -> None:
     current_port = int(current_value) if current_value and current_value.isdigit() else None
 
     port = prompt_for_port(current_port)
-    if port != current_port and not can_bind_port_on_all_interfaces(port):
-        print()
-        print(f"Port {port} is already bound on 0.0.0.0 and cannot be used.")
-        return
-
     updated_config = update_config_value(config_text, "port", str(port))
     write_config_and_restart(updated_config)
 
