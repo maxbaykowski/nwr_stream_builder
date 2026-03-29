@@ -314,8 +314,20 @@ def get_iqbus_active_state() -> str:
     return result.stdout.strip()
 
 
+def iqbus_has_failed() -> bool:
+    return get_iqbus_active_state() == "failed"
+
+
 def iqbus_is_running() -> bool:
-    return get_iqbus_active_state() != "inactive"
+    return get_iqbus_active_state() == "active"
+
+
+def report_failed_iqbus_service() -> bool:
+    if iqbus_has_failed():
+        print()
+        print("Warning: iqbus.service is in the failed state and will be treated as not running.")
+        return True
+    return False
 
 
 def iqbus_starts_on_boot() -> bool:
@@ -324,22 +336,38 @@ def iqbus_starts_on_boot() -> bool:
 
 
 def restart_iqbus_if_active() -> None:
+    if report_failed_iqbus_service():
+        return
     result = run_command(["systemctl", "is-active", "--quiet", "iqbus.service"], check=False)
     if result.returncode == 0:
         run_command(["systemctl", "restart", "iqbus.service"])
+        report_failed_iqbus_service()
 
 
 def restart_iqbus_if_not_inactive() -> None:
+    if report_failed_iqbus_service():
+        return
     if iqbus_is_running():
         run_command(["systemctl", "restart", "iqbus.service"])
+        report_failed_iqbus_service()
 
 
 def start_iqbus_service() -> None:
+    report_failed_iqbus_service()
     run_command(["systemctl", "start", "iqbus.service"])
+    if report_failed_iqbus_service():
+        return
+    print()
+    print("SDR server started.")
 
 
 def stop_iqbus_service() -> None:
+    report_failed_iqbus_service()
     run_command(["systemctl", "stop", "iqbus.service"])
+    if report_failed_iqbus_service():
+        return
+    print()
+    print("SDR server stopped.")
 
 
 def toggle_iqbus_start_on_boot() -> None:
@@ -663,6 +691,9 @@ def toggle_bias_tee() -> None:
 
 def restart_sdr_server() -> None:
     restart_iqbus_if_not_inactive()
+    if iqbus_is_running():
+        print()
+        print("SDR server restarted.")
 
 
 def start_sdr_server() -> None:
@@ -676,35 +707,24 @@ def stop_sdr_server() -> None:
 def server_settings_menu() -> None:
     while True:
         config_text = read_iqbus_config()
+        report_failed_iqbus_service()
         server_running = iqbus_is_running()
         start_on_boot = iqbus_starts_on_boot()
+        current_sample_rate = get_config_value(config_text, "band_sampling_rate") or "unknown"
+        agc_enabled = gain_mode_is_hardware_agc(config_text)
+        current_port = get_config_value(config_text, "port") or "unknown"
 
         options = [
             "Stop SDR Server" if server_running else "Start SDR Server",
             f"Start Server On Host Boot: {'on' if start_on_boot else 'off'}",
         ]
 
-        if not server_running:
-            selection = prompt_menu_with_back(
-                "Server Configuration",
-                options,
-                "Back to main menu",
-            )
+        if server_running:
+            options.append("Restart SDR Server")
 
-            if selection == -1:
-                return
-
-            if selection == 0:
-                start_sdr_server()
-            elif selection == 1:
-                toggle_iqbus_start_on_boot()
-            continue
-
-        current_sample_rate = get_config_value(config_text, "band_sampling_rate") or "unknown"
-        agc_enabled = gain_mode_is_hardware_agc(config_text)
         options.extend(
             [
-                "Restart SDR Server",
+                f"Server Port: {current_port} (TCP port the server listens on)",
                 (
                     "RTL Sample Rate: "
                     f"{current_sample_rate} samples/second "
@@ -723,8 +743,6 @@ def server_settings_menu() -> None:
             f"Bias Tee: {'on' if bias_tee_enabled else 'off'} "
             "(supplies DC power for active antennas or LNAs)"
         )
-        current_port = get_config_value(config_text, "port") or "unknown"
-        options.append(f"Server Port: {current_port} (TCP port the server listens on)")
 
         selection = prompt_menu_with_back(
             "Server Configuration",
@@ -736,32 +754,33 @@ def server_settings_menu() -> None:
             return
 
         if selection == 0:
-            stop_sdr_server()
+            if server_running:
+                stop_sdr_server()
+            else:
+                start_sdr_server()
         elif selection == 1:
             toggle_iqbus_start_on_boot()
-        elif selection == 2:
+        elif selection == 2 and server_running:
             restart_sdr_server()
-        elif selection == 3:
+        elif selection == (3 if server_running else 2):
+            configure_port()
+        elif selection == (4 if server_running else 3):
             configure_sample_rate()
-        elif selection == 4:
+        elif selection == (5 if server_running else 4):
             toggle_hardware_agc()
-        elif selection == 5:
+        elif selection == (6 if server_running else 5):
             if agc_enabled:
                 configure_ppm()
             else:
                 configure_manual_gain()
-        elif selection == 6:
+        elif selection == (7 if server_running else 6):
             if agc_enabled:
                 toggle_bias_tee()
             else:
                 configure_ppm()
-        elif selection == 7:
-            if agc_enabled:
-                configure_port()
-            else:
+        elif selection == (8 if server_running else 7):
+            if not agc_enabled:
                 toggle_bias_tee()
-        elif selection == 8:
-            configure_port()
 
 
 def configure_server() -> None:
