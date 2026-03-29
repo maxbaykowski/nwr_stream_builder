@@ -8,6 +8,7 @@ import pwd
 import readline
 import re
 import shutil
+import socket
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -505,6 +506,56 @@ def configure_ppm() -> None:
     print(f"PPM correction set to {ppm}.")
 
 
+def can_bind_port_on_all_interfaces(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("0.0.0.0", port))
+        except OSError:
+            return False
+    return True
+
+
+def prompt_for_port(current_value: int | None) -> int:
+    while True:
+        print()
+        print("Server Port")
+        print("Controls the TCP port used by sdr_server on 0.0.0.0.")
+        if current_value is not None:
+            print(f"Current value: {current_value}")
+        print("Valid range: 1 to 65535.")
+
+        prefill = str(current_value) if current_value is not None else ""
+        value = prompt_with_prefill("Enter a new server port: ", prefill).strip()
+        if not value.isdigit():
+            print("Enter the port as a whole number.")
+            continue
+
+        port = int(value)
+        if 1 <= port <= 65535:
+            return port
+
+        print("That port is outside the valid TCP port range.")
+
+
+def configure_port() -> None:
+    config_text = read_iqbus_config()
+    current_value = get_config_value(config_text, "port")
+    current_port = int(current_value) if current_value and current_value.isdigit() else None
+
+    port = prompt_for_port(current_port)
+    if port != current_port and not can_bind_port_on_all_interfaces(port):
+        print()
+        print(f"Port {port} is already bound on 0.0.0.0 and cannot be used.")
+        return
+
+    updated_config = update_config_value(config_text, "port", str(port))
+    write_config_and_restart(updated_config)
+
+    print()
+    print(f"Server port set to {port}.")
+
+
 def bias_tee_is_enabled(config_text: str) -> bool:
     return get_config_value(config_text, "bias_t") == "1"
 
@@ -564,6 +615,8 @@ def server_settings_menu() -> None:
             f"Bias Tee: {'on' if bias_tee_enabled else 'off'} "
             "(supplies DC power for active antennas or LNAs)"
         )
+        current_port = get_config_value(config_text, "port") or "unknown"
+        options.append(f"Server Port: {current_port} (TCP port the server listens on)")
 
         selection = prompt_menu_with_back(
             "Server Configuration",
@@ -589,7 +642,12 @@ def server_settings_menu() -> None:
             else:
                 configure_ppm()
         elif selection == 4:
-            toggle_bias_tee()
+            if agc_enabled:
+                configure_port()
+            else:
+                toggle_bias_tee()
+        elif selection == 5:
+            configure_port()
 
 
 def configure_server() -> None:
