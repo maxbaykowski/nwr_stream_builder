@@ -505,6 +505,42 @@ def configure_ppm() -> None:
     print(f"PPM correction set to {ppm}.")
 
 
+def bias_tee_is_enabled(config_text: str) -> bool:
+    return get_config_value(config_text, "bias_t") == "1"
+
+
+def confirm_enable_bias_tee() -> bool:
+    while True:
+        response = input(
+            "Warning: Bias Tee sends DC voltage up the antenna line. Enable it "
+            "only to power active antennas or low noise amplifiers, and do not "
+            "enable it for passive antennas such as telescoping antennas, "
+            "dipole antennas, or J-pole antennas. Continue? (Y/n): "
+        ).strip().lower()
+        if response in ("", "y", "yes"):
+            return True
+        if response in ("n", "no"):
+            return False
+
+        print("Enter y to continue or n to cancel.")
+
+
+def toggle_bias_tee() -> None:
+    config_text = read_iqbus_config()
+    enabled = bias_tee_is_enabled(config_text)
+
+    if not enabled and not confirm_enable_bias_tee():
+        print()
+        print("Bias Tee was not changed.")
+        return
+
+    updated_config = update_config_value(config_text, "bias_t", "0" if enabled else "1")
+    write_config_and_restart(updated_config)
+
+    print()
+    print(f"Bias Tee is now {'on' if not enabled else 'off'}.")
+
+
 def server_settings_menu() -> None:
     while True:
         config_text = read_iqbus_config()
@@ -523,6 +559,11 @@ def server_settings_menu() -> None:
             options.append(f"Manual Gain: {current_gain} dB (sets tuner gain when Hardware AGC is off)")
         current_ppm = get_config_value(config_text, "ppm") or "unknown"
         options.append(f"PPM Correction: {current_ppm} PPM (adjusts tuner frequency correction)")
+        bias_tee_enabled = bias_tee_is_enabled(config_text)
+        options.append(
+            f"Bias Tee: {'on' if bias_tee_enabled else 'off'} "
+            "(supplies DC power for active antennas or LNAs)"
+        )
 
         selection = prompt_menu_with_back(
             "Server Configuration",
@@ -543,7 +584,12 @@ def server_settings_menu() -> None:
             else:
                 configure_manual_gain()
         elif selection == 3:
-            configure_ppm()
+            if agc_enabled:
+                toggle_bias_tee()
+            else:
+                configure_ppm()
+        elif selection == 4:
+            toggle_bias_tee()
 
 
 def configure_server() -> None:
