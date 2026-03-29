@@ -516,6 +516,32 @@ def can_bind_port_on_all_interfaces(port: int) -> bool:
     return True
 
 
+def get_process_name_for_bound_port(port: int) -> str | None:
+    ss = shutil.which("ss")
+    if not ss:
+        return None
+
+    result = run_command([ss, "-ltnpH"], check=False)
+    port_suffixes = (f"0.0.0.0:{port}", f"[::]:{port}", f"*:{port}")
+
+    for line in result.stdout.splitlines():
+        columns = line.split()
+        if len(columns) < 4:
+            continue
+
+        local_address = columns[3]
+        if local_address not in port_suffixes:
+            continue
+
+        process_match = re.search(r'users:\(\("([^"]+)"', line)
+        if process_match:
+            return process_match.group(1)
+
+        return "another process"
+
+    return None
+
+
 def prompt_for_port(current_value: int | None) -> int:
     while True:
         print()
@@ -523,7 +549,7 @@ def prompt_for_port(current_value: int | None) -> int:
         print("Controls the TCP port used by sdr_server on 0.0.0.0.")
         if current_value is not None:
             print(f"Current value: {current_value}")
-        print("Valid range: 1 to 65535.")
+        print("Valid range: 1024 to 65535.")
 
         prefill = str(current_value) if current_value is not None else ""
         value = prompt_with_prefill("Enter a new server port: ", prefill).strip()
@@ -532,12 +558,16 @@ def prompt_for_port(current_value: int | None) -> int:
             continue
 
         port = int(value)
-        if not 1 <= port <= 65535:
+        if not 1024 <= port <= 65535:
             print("That port is outside the valid TCP port range.")
             continue
 
         if port != current_value and not can_bind_port_on_all_interfaces(port):
-            print(f"Port {port} is already bound on 0.0.0.0 and cannot be used.")
+            process_name = get_process_name_for_bound_port(port)
+            if process_name:
+                print(f"Port {port} is already bound on 0.0.0.0 by {process_name} and cannot be used.")
+            else:
+                print(f"Port {port} is already bound on 0.0.0.0 and cannot be used.")
             continue
 
         return port
