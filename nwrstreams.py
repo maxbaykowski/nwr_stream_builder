@@ -704,6 +704,7 @@ def server_settings_menu() -> None:
         agc_enabled = gain_mode_is_hardware_agc(config_text)
         options.extend(
             [
+                "Restart SDR Server",
                 (
                     "RTL Sample Rate: "
                     f"{current_sample_rate} samples/second "
@@ -724,7 +725,6 @@ def server_settings_menu() -> None:
         )
         current_port = get_config_value(config_text, "port") or "unknown"
         options.append(f"Server Port: {current_port} (TCP port the server listens on)")
-        options.append("Restart SDR Server")
 
         selection = prompt_menu_with_back(
             "Server Configuration",
@@ -740,31 +740,28 @@ def server_settings_menu() -> None:
         elif selection == 1:
             toggle_iqbus_start_on_boot()
         elif selection == 2:
-            configure_sample_rate()
+            restart_sdr_server()
         elif selection == 3:
-            toggle_hardware_agc()
+            configure_sample_rate()
         elif selection == 4:
+            toggle_hardware_agc()
+        elif selection == 5:
             if agc_enabled:
                 configure_ppm()
             else:
                 configure_manual_gain()
-        elif selection == 5:
+        elif selection == 6:
             if agc_enabled:
                 toggle_bias_tee()
             else:
                 configure_ppm()
-        elif selection == 6:
+        elif selection == 7:
             if agc_enabled:
                 configure_port()
             else:
                 toggle_bias_tee()
-        elif selection == 7:
-            if agc_enabled:
-                restart_sdr_server()
-            else:
-                configure_port()
         elif selection == 8:
-            restart_sdr_server()
+            configure_port()
 
 
 def configure_server() -> None:
