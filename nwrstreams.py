@@ -347,33 +347,52 @@ def wait_for_iqbus_state(target_state: str, timeout_seconds: float = 10.0) -> st
     return get_iqbus_active_state()
 
 
-def restart_iqbus_if_active() -> None:
+def restart_iqbus_if_active() -> bool:
     if report_failed_iqbus_service():
-        return
+        return False
     result = run_command(["systemctl", "is-active", "--quiet", "iqbus.service"], check=False)
     if result.returncode == 0:
-        run_command(["systemctl", "restart", "iqbus.service"])
+        restart_result = run_command(["systemctl", "restart", "iqbus.service"], check=False)
+        if restart_result.returncode != 0:
+            print()
+            print(IQBUS_FAILED_MESSAGE)
+            return False
         if wait_for_iqbus_state("active") == "failed":
             report_failed_iqbus_service()
+            return False
+        return True
+    return False
 
 
-def restart_iqbus_if_not_inactive() -> None:
+def restart_iqbus_if_not_inactive() -> bool:
     if report_failed_iqbus_service():
-        return
+        return False
     if iqbus_is_running():
-        run_command(["systemctl", "restart", "iqbus.service"])
+        restart_result = run_command(["systemctl", "restart", "iqbus.service"], check=False)
+        if restart_result.returncode != 0:
+            print()
+            print(IQBUS_FAILED_MESSAGE)
+            return False
         if wait_for_iqbus_state("active") == "failed":
             report_failed_iqbus_service()
+            return False
+        return True
+    return False
 
 
-def start_iqbus_service() -> None:
-    run_command(["systemctl", "start", "iqbus.service"])
+def start_iqbus_service() -> bool:
+    start_result = run_command(["systemctl", "start", "iqbus.service"], check=False)
+    if start_result.returncode != 0:
+        print()
+        print(IQBUS_FAILED_MESSAGE)
+        return False
     if wait_for_iqbus_state("active") == "failed":
         print()
         print(IQBUS_FAILED_MESSAGE)
-        return
+        return False
     print()
     print("SDR server started.")
+    return True
 
 
 def stop_iqbus_service() -> None:
@@ -707,8 +726,7 @@ def toggle_bias_tee() -> None:
 
 
 def restart_sdr_server() -> None:
-    restart_iqbus_if_not_inactive()
-    if iqbus_is_running():
+    if restart_iqbus_if_not_inactive():
         print()
         print("SDR server restarted.")
 
