@@ -1,7 +1,11 @@
 #!/usr/bin/env liquidsoap
-callsign=string("")
-samplerate=int()
-freq=int()
+server="<IQBUS_SERVER>"
+port=<IQBUS_PORT>
+callsign="<CALLSIGN>"
+site_name="<SITE_NAME>"
+state_abbrev="<STATE_ABBREV>"
+samplerate=<IQBUS_SAMPLERATE>
+freq=<STATION_FREQ_HZ>
 fallback=string("/usr/local/share/nwr/fallback.wav")
 radio = input.external.rawaudio(
   samplerate=16000,
@@ -10,26 +14,32 @@ radio = input.external.rawaudio(
   max=10.0,
   restart=true,
   restart_on_error=true,
-  "sdr_server_client -k #{server} -p #{port} -s #{samplerate} -b {hardware_freq} -f #{station_freq} | csdr fmdemod | csdr deemphasis --wfm 16000 530e-6 | csdr convert -ifloat -os16"
+  "sdr_server_client -k #{server} -p #{port} -s #{samplerate} -f #{freq} | csdr fmdemod | csdr deemphasis --wfm 16000 530e-6 | csdr convert -ifloat -os16"
   )
 emergency = single(fallback)
 radio = filter(freq=3000.0, mode="low", q=1.0, radio)
 radio = fallback([radio, emergency])
-encoder = %mp3(bitrate=64, stereo=false, samplerate=samplerate)
-rawaudio = %wav(header=false, stereo=false, samplesize=16, samplerate=samplerate)
+encoder = %mp3(bitrate=64, stereo=false, samplerate=16000)
+
+# This is only for EAS logging (if desired)
+rawaudio = %wav(header=false, stereo=false, samplesize=16, samplerate=16000)
+#EAS logging output
 output.external(
   rawaudio,
-  "python3 /usr/local/bin/easrecorder.py --rate #{samplerate} --max-seconds 300 --pre-seconds 10 --post-seconds 10 --outdir #{state_directory} --mp3 --local-time",
+  "python3 /usr/local/bin/easrecorder.py --rate 16000 --max-seconds 300 --pre-seconds 10 --post-seconds 10 --outdir /var/lib/easrecorder/<CALLSIGN_LOWER> --mp3 --local-time",
   radio)
+
+#Ice Cast output
 output.icecast(
   encoder,
-  host="localhost",
-  port=8000,
-  user="source",
-  password="hackme",
-  mount="/mount.mp3",
+  host="<ICECAST_HOST>",
+  port=<ICECAST_PORT>,
+  <ICECAST_TRANSPORT_LINE>
+  user="<ICECAST_USERNAME>",
+  password="<ICECAST_PASSWORD>",
+  mount="<ICECAST_MOUNTPOINT>",
   name=callsign,
-  description="#{callsign} NOAA Weather Radio",
+  description="#{site_name}, #{state_abbrev}",
   genre="Weather",
   public=true,
   radio

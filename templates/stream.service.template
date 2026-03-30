@@ -1,15 +1,16 @@
 [Unit]
-Description=<CALLSIGN123> NOAA Weather Radio stream
+Description=<CALLSIGN> NOAA Weather Radio stream
 After=network-online.target
-after=iqbus.service
+After=iqbus.service
 Wants=network-online.target
-requires=iqbus.service
+Requires=iqbus.service
 [Service]
 Type=simple
-User=<callsign123>
-StateDirectory=easrecorder/<callsign123>
+User=<CALLSIGN_LOWER>
+Group=broadcasters
+StateDirectory=easrecorder/<CALLSIGN_LOWER>
 UMask=0022
-ExecStart=/usr/local/bin/<callsign>.liq
+ExecStart=/usr/local/bin/<CALLSIGN_LOWER>.liq
 Restart=always
 RestartSec=5
 KillMode=control-group

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from difflib import SequenceMatcher
 import grp
 import os
 import pwd
@@ -13,7 +15,9 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 DEPENDENCIES = {
@@ -32,10 +36,19 @@ KNOWN_RTL_USB_IDS = {
 }
 IQBUS_USER = "iqbus"
 IQBUS_GROUP = "plugdev"
+STREAM_GROUP = "broadcasters"
 IQBUS_CONFIG_PATH = Path("/etc/iqbus.config")
 IQBUS_SERVICE_PATH = Path("/etc/systemd/system/iqbus.service")
+STREAM_SERVICE_DIR = Path("/etc/systemd/system")
+LIQUIDSOAP_BIN_DIR = Path("/usr/local/bin")
+FALLBACK_TARGET_DIR = Path("/usr/local/share/nwr")
+FALLBACK_TARGET_PATH = FALLBACK_TARGET_DIR / "fallback.wav"
+EAS_SCRIPT_TARGET_PATH = LIQUIDSOAP_BIN_DIR / "easrecorder.py"
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = BASE_DIR / "templates"
+STATION_DATA_PATH = BASE_DIR / "data" / "nwr_stations.json"
+EAS_SCRIPT_SOURCE_PATH = BASE_DIR / "scripts" / "easrecorder.py"
+FALLBACK_SOURCE_PATH = BASE_DIR / "audio" / "fallback.wav"
 LOW_SAMPLE_RATE_MIN = 225001
 LOW_SAMPLE_RATE_MAX = 300000
 HIGH_SAMPLE_RATE_MIN = 900001
@@ -46,6 +59,17 @@ MAX_MANUAL_GAIN = 49.6
 MIN_PPM = -100
 MAX_PPM = 100
 IQBUS_FAILED_MESSAGE = "Error: SDR Server failed to start!"
+GWES_SUBMISSION_URL = "https://forms.office.com/r/MLx6hKmnCe"
+WEATHER_USA_SUBMISSION_URL = "https://www.weatherusa.net/members/services/radio"
+
+
+@dataclass
+class IcecastOutput:
+    server: str
+    port: str
+    username: str
+    password: str
+    mountpoint: str
 
 
 @dataclass
@@ -141,6 +165,203 @@ def prompt_with_prefill(prompt: str, prefill: str) -> str:
         return input(prompt)
     finally:
         readline.set_startup_hook(None)
+
+
+def normalize_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+
+def default_manual_output() -> IcecastOutput:
+    return IcecastOutput(
+        server="http://127.0.0.1",
+        port="8000",
+        username="source",
+        password="hackme",
+        mountpoint="",
+    )
+
+
+def default_gwes_output() -> IcecastOutput:
+    return IcecastOutput(
+        server="http://ingest.wxr.gwes-cdn.net",
+        port="10000",
+        username="",
+        password="",
+        mountpoint="",
+    )
+
+
+def default_weather_usa_output() -> IcecastOutput:
+    return IcecastOutput(
+        server="http://radio-master.weatherusa.net",
+        port="80",
+        username="source",
+        password="",
+        mountpoint="",
+    )
+
+
+def normalize_server_url(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return ""
+    if value.startswith(("http://", "https://")):
+        return value
+    return f"http://{value}"
+
+
+def normalize_mountpoint(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return ""
+    if value.startswith("/"):
+        return value
+    return f"/{value}"
+
+
+def load_station_catalog() -> list[dict[str, str]]:
+    payload = json.loads(STATION_DATA_PATH.read_text(encoding="utf-8"))
+    return payload["stations"]
+
+
+def station_menu_label(station: dict[str, str]) -> str:
+    return f"{station['site_name']}, {station['state']} | {station['callsign']} | {station['frequency']} MHz"
+
+
+def token_matches_value(token: str, value: str) -> bool:
+    if not value:
+        return False
+
+    normalized_value = normalize_text(value)
+    if not normalized_value:
+        return False
+    if token in normalized_value:
+        return True
+
+    return any(
+        SequenceMatcher(None, token, candidate).ratio() >= 0.86
+        for candidate in normalized_value.split()
+    )
+
+
+def query_tokens_match_station(tokens: list[str], station: dict[str, str]) -> bool:
+    fields = [
+        station["callsign"],
+        station["state"],
+        station["state_name"],
+        station["city"],
+        station["site_name"],
+    ]
+    return all(any(token_matches_value(token, field) for field in fields) for token in tokens)
+
+
+def score_station(tokens: list[str], station: dict[str, str]) -> float:
+    callsign = station["callsign"].lower()
+    state = station["state"].lower()
+    state_name = normalize_text(station["state_name"])
+    city = normalize_text(station["city"])
+    site_name = normalize_text(station["site_name"])
+    searchable_text = " ".join((callsign, state, state_name, city, site_name))
+
+    score = 0.0
+    joined_query = " ".join(tokens)
+    if joined_query == callsign:
+        score += 1000
+    if joined_query == state or joined_query == state_name:
+        score += 700
+    if joined_query == city or joined_query == site_name:
+        score += 600
+    if joined_query in city or joined_query in site_name:
+        score += 250
+    if joined_query in searchable_text:
+        score += 120
+
+    for token in tokens:
+        if token == callsign:
+            score += 400
+        elif token == state or token == state_name:
+            score += 250
+        elif token in city or token in site_name:
+            score += 220
+        elif token in searchable_text:
+            score += 140
+        else:
+            score += max(
+                SequenceMatcher(None, token, callsign).ratio() * 80,
+                SequenceMatcher(None, token, state).ratio() * 50,
+                SequenceMatcher(None, token, state_name).ratio() * 60,
+                SequenceMatcher(None, token, city).ratio() * 70,
+                SequenceMatcher(None, token, site_name).ratio() * 70,
+            )
+
+    return score
+
+
+def search_stations(query: str, stations: list[dict[str, str]]) -> list[dict[str, str]]:
+    normalized_query = normalize_text(query)
+    if not normalized_query:
+        return []
+
+    if re.fullmatch(r"[a-z]{3}\d{2,3}", normalized_query):
+        exact_callsign_matches = [station for station in stations if station["callsign"].lower() == normalized_query]
+        if exact_callsign_matches:
+            return exact_callsign_matches
+
+    if len(normalized_query) == 2 and normalized_query.isalpha():
+        exact_state_matches = [station for station in stations if station["state"].lower() == normalized_query]
+        if exact_state_matches:
+            return exact_state_matches
+
+    tokens = normalized_query.split()
+    scored_results = []
+    for station in stations:
+        if not query_tokens_match_station(tokens, station):
+            continue
+        score = score_station(tokens, station)
+        if score >= 150:
+            scored_results.append((score, station))
+
+    scored_results.sort(
+        key=lambda item: (-item[0], item[1]["state"], item[1]["callsign"], item[1]["site_name"])
+    )
+    return [station for _, station in scored_results]
+
+
+def prompt_station_selection() -> dict[str, str] | None:
+    stations = load_station_catalog()
+    last_query = ""
+
+    while True:
+        print()
+        query = prompt_with_prefill(
+            "Search NOAA Weather Radio stations by state, city, site name, or callsign: ",
+            last_query,
+        ).strip()
+        if not query:
+            print("Enter a search term.")
+            continue
+
+        last_query = query
+        results = search_stations(query, stations)
+        if not results:
+            print("No results found.")
+            continue
+
+        visible_results = results[:25]
+        print()
+        if len(results) > 25:
+            print(f"{len(results)} results found. Showing top 25.")
+        else:
+            print(f"{len(results)} results found.")
+
+        selection = prompt_menu_with_back(
+            "Station Results",
+            [station_menu_label(station) for station in visible_results],
+            "Back to stream setup",
+        )
+        if selection == -1:
+            return None
+        return visible_results[selection]
 
 
 def load_template(name: str) -> str:
@@ -847,12 +1068,280 @@ def configure_server() -> None:
     print(f"Service: {IQBUS_SERVICE_PATH}")
 
 
+def list_existing_streams() -> list[str]:
+    if not STREAM_SERVICE_DIR.exists():
+        return []
+
+    streams = []
+    for path in STREAM_SERVICE_DIR.glob("*.service"):
+        if path.name == IQBUS_SERVICE_PATH.name:
+            continue
+        liq_path = LIQUIDSOAP_BIN_DIR / f"{path.stem}.liq"
+        if liq_path.exists():
+            streams.append(path.stem.upper())
+    return sorted(set(streams))
+
+
+def show_submission_notice(url: str) -> None:
+    print()
+    print(f"You must first submit a stream by visiting the following URL: {url}")
+    print("Press Enter to enter credentials.")
+    while True:
+        if input() == "":
+            return
+
+
+def prompt_output_port(current_value: str) -> str:
+    while True:
+        value = prompt_with_prefill("Port: ", current_value).strip()
+        if not value:
+            return ""
+        if not value.isdigit():
+            print("Enter the port as a whole number.")
+            continue
+        port = int(value)
+        if not 1 <= port <= 65535:
+            print("Port must be between 1 and 65535.")
+            continue
+        return str(port)
+
+
+def output_fields_complete(output: IcecastOutput) -> bool:
+    return all((output.server.strip(), output.port.strip(), output.username.strip(), output.password, output.mountpoint.strip()))
+
+
+def build_output_options(output: IcecastOutput) -> list[str]:
+    options = [
+        f"Server: {output.server or '(blank)'}",
+        f"Port: {output.port or '(blank)'}",
+        f"Username: {output.username or '(blank)'}",
+        f"Password: {'*' * len(output.password) if output.password else '(blank)'}",
+        f"Mountpoint: {output.mountpoint or '(blank)'}",
+    ]
+    if output_fields_complete(output):
+        options.append("Confirm")
+    return options
+
+
+def prompt_output_credentials(output: IcecastOutput) -> IcecastOutput | None:
+    while True:
+        print()
+        print("Icecast Output")
+        print("0. Back")
+        options = build_output_options(output)
+        for index, option in enumerate(options, start=1):
+            print(f"{index}. {option}")
+
+        selection = input("Select an option: ").strip()
+        confirm_index = 6 if output_fields_complete(output) else None
+
+        if not selection:
+            if confirm_index is None:
+                print("One or more fields are left blank.")
+                continue
+            return output
+
+        if not selection.isdigit():
+            print("Enter the number for the option you want.")
+            continue
+
+        selected_index = int(selection)
+        if selected_index == 0:
+            return None
+        if selected_index == 1:
+            output.server = normalize_server_url(prompt_with_prefill("Server: ", output.server).strip())
+        elif selected_index == 2:
+            output.port = prompt_output_port(output.port)
+        elif selected_index == 3:
+            output.username = prompt_with_prefill("Username: ", output.username).strip()
+        elif selected_index == 4:
+            output.password = prompt_with_prefill("Password: ", output.password).strip()
+        elif selected_index == 5:
+            output.mountpoint = normalize_mountpoint(prompt_with_prefill("Mountpoint: ", output.mountpoint).strip())
+        elif selected_index == 6 and confirm_index == 6:
+            return output
+        else:
+            print("That selection is not available.")
+
+
+def prompt_icecast_output() -> IcecastOutput | None:
+    while True:
+        selection = prompt_menu_with_back(
+            "Streaming Platform",
+            [
+                "GWES Weather Radio",
+                "Weather USA",
+                "Enter Credentials Manually",
+            ],
+            "Back to stream setup",
+        )
+        if selection == -1:
+            return None
+        if selection == 0:
+            show_submission_notice(GWES_SUBMISSION_URL)
+            result = prompt_output_credentials(default_gwes_output())
+        elif selection == 1:
+            show_submission_notice(WEATHER_USA_SUBMISSION_URL)
+            result = prompt_output_credentials(default_weather_usa_output())
+        else:
+            result = prompt_output_credentials(default_manual_output())
+        if result is not None:
+            return result
+
+
+def ensure_shared_stream_assets() -> None:
+    FALLBACK_TARGET_DIR.mkdir(parents=True, exist_ok=True)
+    if not FALLBACK_TARGET_PATH.exists():
+        shutil.copy2(FALLBACK_SOURCE_PATH, FALLBACK_TARGET_PATH)
+    eas_target_parent = EAS_SCRIPT_TARGET_PATH.parent
+    eas_target_parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(EAS_SCRIPT_SOURCE_PATH, EAS_SCRIPT_TARGET_PATH)
+
+    ensure_group_exists(STREAM_GROUP)
+    stream_group = grp.getgrnam(STREAM_GROUP)
+    os.chown(FALLBACK_TARGET_DIR, 0, stream_group.gr_gid)
+    os.chmod(FALLBACK_TARGET_DIR, 0o750)
+    os.chown(FALLBACK_TARGET_PATH, 0, stream_group.gr_gid)
+    os.chmod(FALLBACK_TARGET_PATH, 0o640)
+    os.chown(EAS_SCRIPT_TARGET_PATH, 0, 0)
+    os.chmod(EAS_SCRIPT_TARGET_PATH, 0o755)
+
+
+def read_iqbus_stream_settings() -> tuple[str, int, int]:
+    config_text = read_iqbus_config()
+    port_value = get_config_value(config_text, "port")
+    sample_rate_value = get_config_value(config_text, "band_sampling_rate")
+    if not port_value or not port_value.isdigit():
+        raise SetupError("IQ bus config is missing a valid port.")
+    if not sample_rate_value or not sample_rate_value.isdigit():
+        raise SetupError("IQ bus config is missing a valid RTL sample rate.")
+    return ("127.0.0.1", int(port_value), int(sample_rate_value))
+
+
+def frequency_mhz_to_hz(frequency: str) -> int:
+    return int((Decimal(frequency) * Decimal("1000000")).to_integral_value())
+
+
+def escape_liquidsoap_string(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def build_stream_liquidsoap(station: dict[str, str], output: IcecastOutput) -> str:
+    iqbus_host, iqbus_port, iqbus_sample_rate = read_iqbus_stream_settings()
+    output_url = urlparse(output.server)
+    output_host = output_url.hostname
+    if not output_host:
+        raise SetupError("Icecast server is invalid.")
+
+    template = load_template("stream.liq.template")
+    transport_line = ""
+    if output_url.scheme == "https":
+        transport_line = "transport=http.transport.ssl(),"
+
+    replacements = {
+        "<IQBUS_SERVER>": escape_liquidsoap_string(iqbus_host),
+        "<IQBUS_PORT>": str(iqbus_port),
+        "<CALLSIGN>": escape_liquidsoap_string(station["callsign"]),
+        "<CALLSIGN_LOWER>": station["callsign"].lower(),
+        "<SITE_NAME>": escape_liquidsoap_string(station["site_name"]),
+        "<STATE_ABBREV>": escape_liquidsoap_string(station["state"]),
+        "<IQBUS_SAMPLERATE>": str(iqbus_sample_rate),
+        "<STATION_FREQ_HZ>": str(frequency_mhz_to_hz(station["frequency"])),
+        "<ICECAST_HOST>": escape_liquidsoap_string(output_host),
+        "<ICECAST_PORT>": output.port,
+        "<ICECAST_TRANSPORT_LINE>": transport_line,
+        "<ICECAST_USERNAME>": escape_liquidsoap_string(output.username),
+        "<ICECAST_PASSWORD>": escape_liquidsoap_string(output.password),
+        "<ICECAST_MOUNTPOINT>": escape_liquidsoap_string(output.mountpoint),
+    }
+    for placeholder, value in replacements.items():
+        template = template.replace(placeholder, value)
+    return template
+
+
+def build_stream_service(callsign_lower: str) -> str:
+    template = load_template("stream.service.template")
+    replacements = {
+        "<CALLSIGN>": callsign_lower.upper(),
+        "<CALLSIGN_LOWER>": callsign_lower,
+    }
+    for placeholder, value in replacements.items():
+        template = template.replace(placeholder, value)
+    return template
+
+
+def ensure_stream_user(callsign_lower: str) -> None:
+    ensure_group_exists(STREAM_GROUP)
+    ensure_user_exists(callsign_lower)
+    ensure_user_in_group(callsign_lower, STREAM_GROUP)
+
+
+def write_stream_files(callsign_lower: str, liquidsoap_text: str, service_text: str) -> None:
+    liq_path = LIQUIDSOAP_BIN_DIR / f"{callsign_lower}.liq"
+    service_path = STREAM_SERVICE_DIR / f"{callsign_lower}.service"
+    liq_path.write_text(liquidsoap_text, encoding="utf-8")
+    service_path.write_text(service_text, encoding="utf-8")
+
+    stream_user = pwd.getpwnam(callsign_lower)
+    stream_group = grp.getgrnam(STREAM_GROUP)
+    os.chown(liq_path, stream_user.pw_uid, stream_group.gr_gid)
+    os.chmod(liq_path, 0o750)
+    os.chown(service_path, 0, 0)
+    os.chmod(service_path, 0o644)
+
+
+def enable_stream_service(callsign_lower: str) -> None:
+    service_name = f"{callsign_lower}.service"
+    run_command(["systemctl", "daemon-reload"])
+    run_command(["systemctl", "enable", "--now", service_name])
+
+
+def create_stream() -> None:
+    if not IQBUS_CONFIG_PATH.exists():
+        raise SetupError("Configure the SDR server before creating a stream.")
+
+    station = prompt_station_selection()
+    if station is None:
+        return
+
+    output = prompt_icecast_output()
+    if output is None:
+        return
+
+    callsign_lower = station["callsign"].lower()
+    ensure_stream_user(callsign_lower)
+    ensure_shared_stream_assets()
+    liquidsoap_text = build_stream_liquidsoap(station, output)
+    service_text = build_stream_service(callsign_lower)
+    write_stream_files(callsign_lower, liquidsoap_text, service_text)
+    enable_stream_service(callsign_lower)
+
+    print()
+    print(f"Stream {station['callsign']} created and started.")
+
+
+def manage_streams() -> None:
+    while True:
+        existing_streams = list_existing_streams()
+        options = existing_streams + ["Add stream"]
+        selection = prompt_menu_with_back("Manage Streams", options, "Back to main menu")
+        if selection == -1:
+            return
+
+        if selection == len(options) - 1:
+            create_stream()
+        else:
+            print()
+            print(f"Editing existing stream {existing_streams[selection]} is not implemented yet.")
+
+
 def main_menu() -> int:
     while True:
         selection = prompt_menu(
             "NWR Stream Builder",
             [
                 "Server configuration",
+                "Manage streams",
                 "Exit",
             ],
         )
@@ -860,6 +1349,12 @@ def main_menu() -> int:
         if selection == 0:
             try:
                 configure_server()
+            except SetupError as error:
+                print()
+                print(f"Setup failed: {error}", file=sys.stderr)
+        elif selection == 1:
+            try:
+                manage_streams()
             except SetupError as error:
                 print()
                 print(f"Setup failed: {error}", file=sys.stderr)
