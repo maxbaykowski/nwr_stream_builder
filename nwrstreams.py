@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import http.client
 import json
 from difflib import SequenceMatcher
 import grp
@@ -9,11 +11,15 @@ import os
 import pwd
 import readline
 import re
+import select
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
+import termios
 import time
+import tty
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -59,6 +65,7 @@ MAX_MANUAL_GAIN = 49.6
 MIN_PPM = -100
 MAX_PPM = 100
 IQBUS_FAILED_MESSAGE = "Error: SDR Server failed to start!"
+PASSWORD_TOGGLE_CHAR = "\x13"
 GWES_SUBMISSION_URL = "https://forms.office.com/r/MLx6hKmnCe"
 WEATHER_USA_SUBMISSION_URL = "https://www.weatherusa.net/members/services/radio"
 
@@ -165,6 +172,108 @@ def prompt_with_prefill(prompt: str, prefill: str) -> str:
         return input(prompt)
     finally:
         readline.set_startup_hook(None)
+
+
+def parse_keypress() -> str:
+    char = os.read(sys.stdin.fileno(), 1).decode("utf-8", errors="ignore")
+    if char != "\x1b":
+        return char
+
+    if not select.select([sys.stdin], [], [], 0.1)[0]:
+        return char
+
+    sequence = char + os.read(sys.stdin.fileno(), 1).decode("utf-8", errors="ignore")
+    if sequence in ("\x1b[", "\x1bO") and select.select([sys.stdin], [], [], 0.1)[0]:
+        sequence += os.read(sys.stdin.fileno(), 1).decode("utf-8", errors="ignore")
+    if sequence.startswith("\x1b[") and sequence[-1:].isdigit() and select.select([sys.stdin], [], [], 0.1)[0]:
+        sequence += os.read(sys.stdin.fileno(), 1).decode("utf-8", errors="ignore")
+
+    normalized_sequences = {
+        "\x1bOA": "\x1b[A",
+        "\x1bOB": "\x1b[B",
+        "\x1bOC": "\x1b[C",
+        "\x1bOD": "\x1b[D",
+        "\x1bOH": "\x1b[H",
+        "\x1bOF": "\x1b[F",
+    }
+    return normalized_sequences.get(sequence, sequence)
+
+
+def render_text_prompt(prompt: str, buffer: list[str], cursor: int, visible: bool = True) -> None:
+    display = "".join(buffer) if visible else "*" * len(buffer)
+    sys.stdout.write("\r")
+    sys.stdout.write("\033[2K")
+    sys.stdout.write(f"{prompt}{display}")
+    cursor_back = len(display) - cursor
+    if cursor_back > 0:
+        sys.stdout.write(f"\033[{cursor_back}D")
+    sys.stdout.flush()
+
+
+def prompt_text(prompt: str, prefill: str, hidden: bool = False, allow_toggle: bool = False) -> str:
+    if not sys.stdin.isatty():
+        return input(prompt)
+
+    if allow_toggle:
+        sys.stdout.write("\nPress Ctrl+S to show or hide the password.\n")
+        sys.stdout.flush()
+
+    buffer = list(prefill)
+    cursor = len(buffer)
+    visible = not hidden
+    file_descriptor = sys.stdin.fileno()
+    original_settings = termios.tcgetattr(file_descriptor)
+
+    try:
+        tty.setraw(file_descriptor)
+        render_text_prompt(prompt, buffer, cursor, visible)
+        while True:
+            key = parse_keypress()
+            if key in ("\r", "\n"):
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                return "".join(buffer)
+            if allow_toggle and key == PASSWORD_TOGGLE_CHAR:
+                visible = not visible
+                render_text_prompt(prompt, buffer, cursor, visible)
+                continue
+            if key == "\x03":
+                raise KeyboardInterrupt
+            if key in ("\x7f", "\b"):
+                if cursor > 0:
+                    del buffer[cursor - 1]
+                    cursor -= 1
+                    render_text_prompt(prompt, buffer, cursor, visible)
+                continue
+            if key == "\x1b[D":
+                if cursor > 0:
+                    cursor -= 1
+                    render_text_prompt(prompt, buffer, cursor, visible)
+                continue
+            if key == "\x1b[C":
+                if cursor < len(buffer):
+                    cursor += 1
+                    render_text_prompt(prompt, buffer, cursor, visible)
+                continue
+            if key == "\x1b[H":
+                cursor = 0
+                render_text_prompt(prompt, buffer, cursor, visible)
+                continue
+            if key == "\x1b[F":
+                cursor = len(buffer)
+                render_text_prompt(prompt, buffer, cursor, visible)
+                continue
+            if key == "\x1b[3~":
+                if cursor < len(buffer):
+                    del buffer[cursor]
+                    render_text_prompt(prompt, buffer, cursor, visible)
+                continue
+            if key.isprintable():
+                buffer.insert(cursor, key)
+                cursor += 1
+                render_text_prompt(prompt, buffer, cursor, visible)
+    finally:
+        termios.tcsetattr(file_descriptor, termios.TCSADRAIN, original_settings)
 
 
 def normalize_text(value: str) -> str:
@@ -1093,7 +1202,7 @@ def show_submission_notice(url: str) -> None:
 
 def prompt_output_port(current_value: str) -> str:
     while True:
-        value = prompt_with_prefill("Port: ", current_value).strip()
+        value = prompt_text("Port: ", current_value).strip()
         if not value:
             return ""
         if not value.isdigit():
@@ -1123,6 +1232,73 @@ def build_output_options(output: IcecastOutput) -> list[str]:
     return options
 
 
+def parse_output_target(output: IcecastOutput) -> tuple[str, int, str, bool]:
+    parsed = urlparse(output.server)
+    host = parsed.hostname
+    if not host:
+        raise ValueError("Server is invalid.")
+
+    port = int(output.port)
+    scheme = parsed.scheme or "http"
+    use_https = scheme == "https"
+    path_prefix = parsed.path.rstrip("/")
+    target = f"{path_prefix}{output.mountpoint}" if path_prefix else output.mountpoint
+    return host, port, target, use_https
+
+
+def authenticate_output(output: IcecastOutput) -> tuple[bool, str]:
+    try:
+        host, port, target, use_https = parse_output_target(output)
+    except ValueError as error:
+        return False, str(error)
+
+    auth_bytes = f"{output.username}:{output.password}".encode("utf-8")
+    auth_header = base64.b64encode(auth_bytes).decode("ascii")
+    headers = {
+        "Authorization": f"Basic {auth_header}",
+        "Content-Length": "0",
+        "Content-Type": "audio/mpeg",
+        "User-Agent": "nwr_stream_builder/stream-setup",
+    }
+
+    connection_class = http.client.HTTPSConnection if use_https else http.client.HTTPConnection
+    kwargs = {"timeout": 10}
+    if use_https:
+        kwargs["context"] = ssl.create_default_context()
+
+    connection = None
+    response = None
+    try:
+        connection = connection_class(host, port, **kwargs)
+        connection.request("SOURCE", target, body=b"", headers=headers)
+        response = connection.getresponse()
+    except OSError as error:
+        return False, f"Connection failed: {error}"
+    except http.client.HTTPException as error:
+        return False, f"HTTP error: {error}"
+    finally:
+        try:
+            if response is not None:
+                response.close()
+        except Exception:
+            pass
+        try:
+            if connection is not None:
+                connection.close()
+        except Exception:
+            pass
+
+    if response.status == 200:
+        return True, "Icecast source authentication succeeded."
+    if response.status == 401:
+        return False, "Authentication failed: HTTP 401 Unauthorized. Check the username, password, and mountpoint."
+    if response.status == 403:
+        return False, "Authentication failed: HTTP 403 Forbidden. Another source is already connected to that mountpoint."
+    if response.status == 404:
+        return False, "Authentication failed: HTTP 404 Not Found. Check the server address and mountpoint."
+    return False, f"Authentication failed: HTTP {response.status} {response.reason}"
+
+
 def prompt_output_credentials(output: IcecastOutput) -> IcecastOutput | None:
     while True:
         print()
@@ -1149,17 +1325,21 @@ def prompt_output_credentials(output: IcecastOutput) -> IcecastOutput | None:
         if selected_index == 0:
             return None
         if selected_index == 1:
-            output.server = normalize_server_url(prompt_with_prefill("Server: ", output.server).strip())
+            output.server = normalize_server_url(prompt_text("Server: ", output.server).strip())
         elif selected_index == 2:
             output.port = prompt_output_port(output.port)
         elif selected_index == 3:
-            output.username = prompt_with_prefill("Username: ", output.username).strip()
+            output.username = prompt_text("Username: ", output.username).strip()
         elif selected_index == 4:
-            output.password = prompt_with_prefill("Password: ", output.password).strip()
+            output.password = prompt_text("Password: ", output.password, hidden=True, allow_toggle=True)
         elif selected_index == 5:
-            output.mountpoint = normalize_mountpoint(prompt_with_prefill("Mountpoint: ", output.mountpoint).strip())
+            output.mountpoint = normalize_mountpoint(prompt_text("Mountpoint: ", output.mountpoint).strip())
         elif selected_index == 6 and confirm_index == 6:
-            return output
+            success, message = authenticate_output(output)
+            print()
+            print(message)
+            if success:
+                return output
         else:
             print("That selection is not available.")
 
