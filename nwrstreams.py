@@ -1207,15 +1207,12 @@ def ensure_shared_stream_assets() -> None:
     os.chmod(EAS_SCRIPT_TARGET_PATH, 0o755)
 
 
-def read_iqbus_stream_settings() -> tuple[str, int, int]:
+def read_iqbus_stream_settings() -> tuple[str, int]:
     config_text = read_iqbus_config()
     port_value = get_config_value(config_text, "port")
-    sample_rate_value = get_config_value(config_text, "band_sampling_rate")
     if not port_value or not port_value.isdigit():
         raise SetupError("IQ bus config is missing a valid port.")
-    if not sample_rate_value or not sample_rate_value.isdigit():
-        raise SetupError("IQ bus config is missing a valid RTL sample rate.")
-    return ("127.0.0.1", int(port_value), int(sample_rate_value))
+    return ("127.0.0.1", int(port_value))
 
 
 def frequency_mhz_to_hz(frequency: str) -> int:
@@ -1227,7 +1224,7 @@ def escape_liquidsoap_string(value: str) -> str:
 
 
 def build_stream_liquidsoap(station: dict[str, str], output: IcecastOutput) -> str:
-    iqbus_host, iqbus_port, iqbus_sample_rate = read_iqbus_stream_settings()
+    iqbus_host, iqbus_port = read_iqbus_stream_settings()
     output_url = urlparse(output.server)
     output_host = output_url.hostname
     if not output_host:
@@ -1245,7 +1242,6 @@ def build_stream_liquidsoap(station: dict[str, str], output: IcecastOutput) -> s
         "<CALLSIGN_LOWER>": station["callsign"].lower(),
         "<SITE_NAME>": escape_liquidsoap_string(station["site_name"]),
         "<STATE_ABBREV>": escape_liquidsoap_string(station["state"]),
-        "<IQBUS_SAMPLERATE>": str(iqbus_sample_rate),
         "<STATION_FREQ_HZ>": str(frequency_mhz_to_hz(station["frequency"])),
         "<ICECAST_HOST>": escape_liquidsoap_string(output_host),
         "<ICECAST_PORT>": output.port,
