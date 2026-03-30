@@ -1315,7 +1315,12 @@ def prompt_output_credentials(output: IcecastOutput) -> IcecastOutput | None:
             if confirm_index is None:
                 print("One or more fields are left blank.")
                 continue
-            return output
+            success, message = authenticate_output(output)
+            print()
+            print(message)
+            if success:
+                return output
+            continue
 
         if not selection.isdigit():
             print("Enter the number for the option you want.")
