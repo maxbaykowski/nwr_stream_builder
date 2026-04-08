@@ -376,15 +376,16 @@ def normalize_site_name_for_mount(site_name: str) -> str:
 def noaa_radio_org_mountpoint(station: dict[str, str], slot: int) -> str:
     base = f"{station['state']}-{normalize_site_name_for_mount(station['site_name'])}-{station['callsign']}"
     if slot <= 0:
-        return base
-    return f"{base}-alt{slot}"
+        return f"/{base}"
+    return f"/{base}-alt{slot}"
 
 
 def noaa_radio_org_mountpoint_slot(station: dict[str, str], mountpoint: str) -> int | None:
+    normalized_mountpoint = normalize_mountpoint(mountpoint)
     base = noaa_radio_org_mountpoint(station, 0)
-    if mountpoint == base:
+    if normalized_mountpoint == base:
         return 0
-    match = re.fullmatch(rf"{re.escape(base)}-alt([1-5])", mountpoint)
+    match = re.fullmatch(rf"{re.escape(base)}-alt([1-5])", normalized_mountpoint)
     if match:
         return int(match.group(1))
     return None
