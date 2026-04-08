@@ -68,6 +68,8 @@ IQBUS_FAILED_MESSAGE = "Error: SDR Server failed to start!"
 PASSWORD_TOGGLE_CHAR = "\x13"
 GWES_SUBMISSION_URL = "https://forms.office.com/r/MLx6hKmnCe"
 WEATHER_USA_SUBMISSION_URL = "https://www.weatherusa.net/members/services/radio"
+NOAA_RADIO_ORG_LOOKUP_URL = "https://noaaweatherradio.org/N2radio-finder.php"
+NOAA_RADIO_ORG_SUBMISSION_URL = "http://noaaweatherradio.org/addstream/addstream.html"
 
 
 @dataclass
@@ -321,6 +323,28 @@ def default_weather_usa_output() -> IcecastOutput:
     )
 
 
+def default_noaa_radio_org_output(station: dict[str, str]) -> IcecastOutput:
+    return IcecastOutput(
+        server="http://wxradio.org",
+        port="8000",
+        username="source",
+        password="WxRadio2014",
+        mountpoint=noaa_radio_org_mountpoint(station, 0),
+        bitrate="32",
+    )
+
+
+def default_noaa_radio_org_custom_output() -> IcecastOutput:
+    return IcecastOutput(
+        server="http://wxradio.org",
+        port="8000",
+        username="source",
+        password="WxRadio2014",
+        mountpoint="",
+        bitrate="32",
+    )
+
+
 def normalize_server_url(value: str) -> str:
     value = value.strip()
     if not value:
@@ -342,6 +366,51 @@ def normalize_mountpoint(value: str) -> str:
 def output_host(output: IcecastOutput) -> str:
     parsed = urlparse(output.server)
     return parsed.hostname or ""
+
+
+def normalize_site_name_for_mount(site_name: str) -> str:
+    tokens = re.findall(r"[A-Za-z0-9]+", site_name)
+    return "".join(token[:1].upper() + token[1:] for token in tokens)
+
+
+def noaa_radio_org_mountpoint(station: dict[str, str], slot: int) -> str:
+    base = f"{station['state']}-{normalize_site_name_for_mount(station['site_name'])}-{station['callsign']}"
+    if slot <= 0:
+        return base
+    return f"{base}-alt{slot}"
+
+
+def noaa_radio_org_mountpoint_slot(station: dict[str, str], mountpoint: str) -> int | None:
+    base = noaa_radio_org_mountpoint(station, 0)
+    if mountpoint == base:
+        return 0
+    match = re.fullmatch(rf"{re.escape(base)}-alt([1-5])", mountpoint)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def output_provider(output: IcecastOutput, station: dict[str, str] | None = None) -> str:
+    host = output_host(output).lower()
+    if host == "ingest.wxr.gwes-cdn.net" and output.port == "10000":
+        return "gwes"
+    if host == "radio-master.weatherusa.net" and output.port == "80" and output.username == "source":
+        return "weatherusa"
+    if (
+        station is not None
+        and host == "wxradio.org"
+        and output.port == "8000"
+        and output.username == "source"
+        and output.password == "WxRadio2014"
+        and output.bitrate == "32"
+        and noaa_radio_org_mountpoint_slot(station, output.mountpoint) is not None
+    ):
+        return "noaa_radio_org"
+    return "custom"
+
+
+def provider_hosts() -> set[str]:
+    return {"ingest.wxr.gwes-cdn.net", "radio-master.weatherusa.net", "wxradio.org"}
 
 
 def bitrate_limits_for_output(output: IcecastOutput) -> tuple[int, int]:
@@ -376,6 +445,13 @@ def prompt_output_bitrate(output: IcecastOutput) -> str:
 def load_station_catalog() -> list[dict[str, str]]:
     payload = json.loads(STATION_DATA_PATH.read_text(encoding="utf-8"))
     return payload["stations"]
+
+
+def get_station_by_callsign(callsign: str) -> dict[str, str] | None:
+    for station in load_station_catalog():
+        if station["callsign"].lower() == callsign.lower():
+            return station
+    return None
 
 
 def station_menu_label(station: dict[str, str]) -> str:
@@ -1323,6 +1399,66 @@ def show_submission_notice(url: str) -> None:
             return
 
 
+def show_noaa_radio_org_lookup_notice() -> None:
+    print()
+    print(f"Use the NOAA Weather Radio Org station lookup tool to check for mountpoint conflicts: {NOAA_RADIO_ORG_LOOKUP_URL}")
+    print("Press Enter to continue.")
+    while True:
+        if input() == "":
+            return
+
+
+def collect_used_mountpoints(hostname: str, exclude: tuple[str, str] | None = None) -> set[str]:
+    mountpoints: set[str] = set()
+    for callsign in list_existing_streams():
+        for parsed_output in extract_liquidsoap_icecast_outputs(read_stream_config(callsign.lower())):
+            if output_host(parsed_output.output).lower() != hostname.lower():
+                continue
+            key = (callsign.lower(), parsed_output.output.mountpoint)
+            if exclude is not None and key == exclude:
+                continue
+            mountpoints.add(parsed_output.output.mountpoint)
+    return mountpoints
+
+
+def first_open_noaa_mountpoint_slot(station: dict[str, str], exclude: tuple[str, str] | None = None) -> int:
+    used_mountpoints = collect_used_mountpoints("wxradio.org", exclude=exclude)
+    for slot in range(0, 6):
+        candidate = noaa_radio_org_mountpoint(station, slot)
+        if candidate not in used_mountpoints:
+            return slot
+    return 0
+
+
+def prompt_noaa_mountpoint(station: dict[str, str], current_mountpoint: str | None, exclude: tuple[str, str] | None = None) -> str:
+    slot = noaa_radio_org_mountpoint_slot(station, current_mountpoint or "")
+    if slot is None:
+        slot = first_open_noaa_mountpoint_slot(station, exclude=exclude)
+
+    print()
+    print("Use the up and down arrow keys to choose a mountpoint slot. Press Enter to accept.")
+    file_descriptor = sys.stdin.fileno()
+    original_settings = termios.tcgetattr(file_descriptor)
+    try:
+        tty.setraw(file_descriptor)
+        while True:
+            mountpoint = noaa_radio_org_mountpoint(station, slot)
+            render_text_prompt("Mountpoint: ", list(mountpoint), len(mountpoint), True)
+            key = parse_keypress()
+            if key in ("\r", "\n"):
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                return mountpoint
+            if key == "\x03":
+                raise KeyboardInterrupt
+            if key == "\x1b[A" and slot < 5:
+                slot += 1
+            elif key == "\x1b[B" and slot > 0:
+                slot -= 1
+    finally:
+        termios.tcsetattr(file_descriptor, termios.TCSADRAIN, original_settings)
+
+
 def prompt_output_port(current_value: str) -> str:
     while True:
         value = prompt_text("Port: ", current_value).strip()
@@ -1338,6 +1474,18 @@ def prompt_output_port(current_value: str) -> str:
         return str(port)
 
 
+def prompt_custom_output_server(current_value: str) -> str:
+    while True:
+        value = normalize_server_url(prompt_text("Server: ", current_value).strip())
+        if not value:
+            return ""
+        host = (urlparse(value).hostname or "").lower()
+        if host in provider_hosts():
+            print("Please choose the relevant streaming platform from the platform selection menu.")
+            continue
+        return value
+
+
 def output_fields_complete(output: IcecastOutput) -> bool:
     return all(
         (
@@ -1351,15 +1499,29 @@ def output_fields_complete(output: IcecastOutput) -> bool:
     )
 
 
-def build_output_options(output: IcecastOutput) -> list[str]:
-    options = [
-        f"Server: {output.server or '(blank)'}",
-        f"Port: {output.port or '(blank)'}",
-        f"Username: {output.username or '(blank)'}",
-        f"Password: {'*' * len(output.password) if output.password else '(blank)'}",
-        f"Mountpoint: {output.mountpoint or '(blank)'}",
-        f"Bitrate: {output.bitrate or '(blank)'} kbps",
-    ]
+def build_output_options(output: IcecastOutput, station: dict[str, str] | None = None) -> list[str]:
+    provider = output_provider(output, station)
+    options = []
+    if provider == "custom":
+        options.append(f"Server: {output.server or '(blank)'}")
+        options.append(f"Port: {output.port or '(blank)'}")
+        options.append(f"Username: {output.username or '(blank)'}")
+    elif provider == "gwes":
+        options.append(f"Username: {output.username or '(blank)'}")
+    elif provider == "noaa_radio_org":
+        options.append(f"Mountpoint: {output.mountpoint or '(blank)'}")
+        if output_fields_complete(output):
+            options.append("Confirm")
+        return options
+    else:
+        pass
+    options.extend(
+        [
+            f"Password: {'*' * len(output.password) if output.password else '(blank)'}",
+            f"Mountpoint: {output.mountpoint or '(blank)'}",
+            f"Bitrate: {output.bitrate or '(blank)'} kbps",
+        ]
+    )
     if output_fields_complete(output):
         options.append("Confirm")
     return options
@@ -1432,17 +1594,32 @@ def authenticate_output(output: IcecastOutput) -> tuple[bool, str]:
     return False, f"Authentication failed: HTTP {response.status} {response.reason}"
 
 
-def prompt_output_credentials(output: IcecastOutput) -> IcecastOutput | None:
+def prompt_output_credentials(
+    output: IcecastOutput,
+    station: dict[str, str] | None = None,
+    exclude: tuple[str, str] | None = None,
+) -> IcecastOutput | None:
     while True:
         print()
         print("Icecast Output")
         print("0. Back")
-        options = build_output_options(output)
+        options = build_output_options(output, station)
         for index, option in enumerate(options, start=1):
             print(f"{index}. {option}")
 
         selection = input("Select an option: ").strip()
-        confirm_index = 7 if output_fields_complete(output) else None
+        provider = output_provider(output, station)
+        editable_fields: list[str] = []
+        if provider == "custom":
+            editable_fields.extend(["server", "port", "username"])
+        elif provider == "gwes":
+            editable_fields.append("username")
+        elif provider == "noaa_radio_org":
+            editable_fields.extend(["mountpoint"])
+        editable_fields.extend(["password", "mountpoint", "bitrate"])
+        if provider == "noaa_radio_org":
+            editable_fields = ["mountpoint"]
+        confirm_index = len(editable_fields) + 1 if output_fields_complete(output) else None
 
         if not selection:
             if confirm_index is None:
@@ -1452,6 +1629,8 @@ def prompt_output_credentials(output: IcecastOutput) -> IcecastOutput | None:
             print()
             print(message)
             if success:
+                if provider == "noaa_radio_org":
+                    show_submission_notice(NOAA_RADIO_ORG_SUBMISSION_URL)
                 return output
             continue
 
@@ -1462,37 +1641,45 @@ def prompt_output_credentials(output: IcecastOutput) -> IcecastOutput | None:
         selected_index = int(selection)
         if selected_index == 0:
             return None
-        if selected_index == 1:
-            output.server = normalize_server_url(prompt_text("Server: ", output.server).strip())
-            if output_host(output).lower() == "radio-master.weatherusa.net" and not output.bitrate:
-                output.bitrate = "32"
-        elif selected_index == 2:
-            output.port = prompt_output_port(output.port)
-        elif selected_index == 3:
-            output.username = prompt_text("Username: ", output.username).strip()
-        elif selected_index == 4:
-            output.password = prompt_text("Password: ", output.password, hidden=True, allow_toggle=True)
-        elif selected_index == 5:
-            output.mountpoint = normalize_mountpoint(prompt_text("Mountpoint: ", output.mountpoint).strip())
-        elif selected_index == 6:
-            output.bitrate = prompt_output_bitrate(output)
-        elif selected_index == 7 and confirm_index == 7:
+        if 1 <= selected_index <= len(editable_fields):
+            field = editable_fields[selected_index - 1]
+            if field == "server":
+                output.server = prompt_custom_output_server(output.server)
+            elif field == "port":
+                output.port = prompt_output_port(output.port)
+            elif field == "username":
+                output.username = prompt_text("Username: ", output.username).strip()
+            elif field == "password":
+                output.password = prompt_text("Password: ", output.password, hidden=True, allow_toggle=True)
+            elif field == "mountpoint":
+                if provider == "noaa_radio_org":
+                    if station is None:
+                        raise SetupError("Station metadata is required for NOAA Weather Radio Org outputs.")
+                    output.mountpoint = prompt_noaa_mountpoint(station, output.mountpoint, exclude=exclude)
+                else:
+                    output.mountpoint = normalize_mountpoint(prompt_text("Mountpoint: ", output.mountpoint).strip())
+            elif field == "bitrate":
+                output.bitrate = prompt_output_bitrate(output)
+        elif confirm_index is not None and selected_index == confirm_index:
             success, message = authenticate_output(output)
             print()
             print(message)
             if success:
+                if provider == "noaa_radio_org":
+                    show_submission_notice(NOAA_RADIO_ORG_SUBMISSION_URL)
                 return output
         else:
             print("That selection is not available.")
 
 
-def prompt_icecast_output() -> IcecastOutput | None:
+def prompt_icecast_output(station: dict[str, str] | None) -> IcecastOutput | None:
     while True:
         selection = prompt_menu_with_back(
             "Streaming Platform",
             [
                 "GWES Weather Radio",
                 "Weather USA",
+                "NOAA Weather Radio Org",
                 "Enter Credentials Manually",
             ],
             "Back to stream setup",
@@ -1501,12 +1688,18 @@ def prompt_icecast_output() -> IcecastOutput | None:
             return None
         if selection == 0:
             show_submission_notice(GWES_SUBMISSION_URL)
-            result = prompt_output_credentials(default_gwes_output())
+            result = prompt_output_credentials(default_gwes_output(), station=station)
         elif selection == 1:
             show_submission_notice(WEATHER_USA_SUBMISSION_URL)
-            result = prompt_output_credentials(default_weather_usa_output())
+            result = prompt_output_credentials(default_weather_usa_output(), station=station)
+        elif selection == 2:
+            show_noaa_radio_org_lookup_notice()
+            if station is None:
+                result = prompt_output_credentials(default_noaa_radio_org_custom_output(), station=None)
+            else:
+                result = prompt_output_credentials(default_noaa_radio_org_output(station), station=station)
         else:
-            result = prompt_output_credentials(default_manual_output())
+            result = prompt_output_credentials(default_manual_output(), station=station)
         if result is not None:
             return result
 
@@ -1761,7 +1954,7 @@ def create_stream() -> None:
     if station is None:
         return
 
-    output = prompt_icecast_output()
+    output = prompt_icecast_output(station)
     if output is None:
         return
 
@@ -1811,20 +2004,43 @@ def append_output_to_stream(callsign_lower: str, output: IcecastOutput) -> None:
     print("Output added.")
 
 
-def edit_output_menu(callsign_lower: str, parsed_output: ParsedIcecastOutput) -> None:
+def edit_output_menu(
+    callsign_lower: str,
+    parsed_output: ParsedIcecastOutput,
+    station: dict[str, str] | None,
+) -> None:
     output = IcecastOutput(**vars(parsed_output.output))
     while True:
         print()
         print("Edit Output")
         print("0. Back")
-        options = [
-            f"Server: {output.server or '(blank)'}",
-            f"Port: {output.port or '(blank)'}",
-            f"Username: {output.username or '(blank)'}",
-            f"Password: {'*' * len(output.password) if output.password else '(blank)'}",
-            f"Mountpoint: {output.mountpoint or '(blank)'}",
-            f"Bitrate: {output.bitrate or '(blank)'} kbps",
-        ]
+        provider = output_provider(output, station)
+        editable_fields: list[str] = []
+        options = []
+        if provider == "custom":
+            editable_fields.extend(["server", "port", "username"])
+            options.extend(
+                [
+                    f"Server: {output.server or '(blank)'}",
+                    f"Port: {output.port or '(blank)'}",
+                    f"Username: {output.username or '(blank)'}",
+                ]
+            )
+        elif provider == "gwes":
+            editable_fields.append("username")
+            options.append(f"Username: {output.username or '(blank)'}")
+        elif provider == "noaa_radio_org":
+            editable_fields.append("mountpoint")
+            options.append(f"Mountpoint: {output.mountpoint or '(blank)'}")
+        if provider != "noaa_radio_org":
+            editable_fields.extend(["password", "mountpoint", "bitrate"])
+            options.extend(
+                [
+                    f"Password: {'*' * len(output.password) if output.password else '(blank)'}",
+                    f"Mountpoint: {output.mountpoint or '(blank)'}",
+                    f"Bitrate: {output.bitrate or '(blank)'} kbps",
+                ]
+            )
         confirm_index = None
         if output_fields_complete(output):
             options.append("Confirm")
@@ -1854,23 +2070,34 @@ def edit_output_menu(callsign_lower: str, parsed_output: ParsedIcecastOutput) ->
         selected_index = int(selection)
         if selected_index == 0:
             return
-        if selected_index == 1:
-            output.server = normalize_server_url(prompt_text("Server: ", output.server).strip())
-        elif selected_index == 2:
-            output.port = prompt_output_port(output.port)
-        elif selected_index == 3:
-            output.username = prompt_text("Username: ", output.username).strip()
-        elif selected_index == 4:
-            output.password = prompt_text("Password: ", output.password, hidden=True, allow_toggle=True)
-        elif selected_index == 5:
-            output.mountpoint = normalize_mountpoint(prompt_text("Mountpoint: ", output.mountpoint).strip())
-        elif selected_index == 6:
-            output.bitrate = prompt_output_bitrate(output)
+        if 1 <= selected_index <= len(editable_fields):
+            field = editable_fields[selected_index - 1]
+            if field == "server":
+                output.server = prompt_custom_output_server(output.server)
+            elif field == "port":
+                output.port = prompt_output_port(output.port)
+            elif field == "username":
+                output.username = prompt_text("Username: ", output.username).strip()
+            elif field == "password":
+                output.password = prompt_text("Password: ", output.password, hidden=True, allow_toggle=True)
+            elif field == "mountpoint":
+                if provider == "noaa_radio_org":
+                    output.mountpoint = prompt_noaa_mountpoint(
+                        station,
+                        output.mountpoint,
+                        exclude=(callsign_lower, parsed_output.output.mountpoint),
+                    )
+                else:
+                    output.mountpoint = normalize_mountpoint(prompt_text("Mountpoint: ", output.mountpoint).strip())
+            elif field == "bitrate":
+                output.bitrate = prompt_output_bitrate(output)
         elif confirm_index is not None and selected_index == confirm_index:
             success, message = authenticate_output(output)
             print()
             print(message)
             if success:
+                if provider == "noaa_radio_org":
+                    show_submission_notice(NOAA_RADIO_ORG_SUBMISSION_URL)
                 update_output_in_stream(callsign_lower, parsed_output, output)
                 return
         elif selected_index == remove_index:
@@ -1880,7 +2107,7 @@ def edit_output_menu(callsign_lower: str, parsed_output: ParsedIcecastOutput) ->
             print("That selection is not available.")
 
 
-def outputs_menu(callsign_lower: str) -> None:
+def outputs_menu(callsign_lower: str, station: dict[str, str] | None) -> None:
     while True:
         parsed_outputs = extract_liquidsoap_icecast_outputs(read_stream_config(callsign_lower))
         options = [output_menu_label(parsed.output) for parsed in parsed_outputs]
@@ -1889,15 +2116,16 @@ def outputs_menu(callsign_lower: str) -> None:
         if selection == -1:
             return
         if selection == len(options) - 1:
-            output = prompt_icecast_output()
+            output = prompt_icecast_output(station)
             if output is not None:
                 append_output_to_stream(callsign_lower, output)
         else:
-            edit_output_menu(callsign_lower, parsed_outputs[selection])
+            edit_output_menu(callsign_lower, parsed_outputs[selection], station)
 
 
 def stream_menu(callsign: str) -> None:
     callsign_lower = callsign.lower()
+    station = get_station_by_callsign(callsign)
     while True:
         service_name = f"{callsign_lower}.service"
         report_failed_stream_service(callsign_lower)
@@ -1913,7 +2141,7 @@ def stream_menu(callsign: str) -> None:
         if selection == -1:
             return
         if selection == 0:
-            outputs_menu(callsign_lower)
+            outputs_menu(callsign_lower, station)
         elif selection == 1:
             if stream_running:
                 stop_stream_service(callsign_lower)
