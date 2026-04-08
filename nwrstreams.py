@@ -77,6 +77,14 @@ class IcecastOutput:
     username: str
     password: str
     mountpoint: str
+    bitrate: str
+
+
+@dataclass
+class ParsedIcecastOutput:
+    output: IcecastOutput
+    start: int
+    end: int
 
 
 @dataclass
@@ -287,6 +295,7 @@ def default_manual_output() -> IcecastOutput:
         username="source",
         password="hackme",
         mountpoint="",
+        bitrate="64",
     )
 
 
@@ -297,6 +306,7 @@ def default_gwes_output() -> IcecastOutput:
         username="",
         password="",
         mountpoint="",
+        bitrate="64",
     )
 
 
@@ -307,6 +317,7 @@ def default_weather_usa_output() -> IcecastOutput:
         username="source",
         password="",
         mountpoint="",
+        bitrate="32",
     )
 
 
@@ -326,6 +337,40 @@ def normalize_mountpoint(value: str) -> str:
     if value.startswith("/"):
         return value
     return f"/{value}"
+
+
+def output_host(output: IcecastOutput) -> str:
+    parsed = urlparse(output.server)
+    return parsed.hostname or ""
+
+
+def bitrate_limits_for_output(output: IcecastOutput) -> tuple[int, int]:
+    host = output_host(output).lower()
+    if host == "ingest.wxr.gwes-cdn.net":
+        return (64, 128)
+    if host == "radio-master.weatherusa.net":
+        return (16, 56)
+    return (16, 320)
+
+
+def prompt_output_bitrate(output: IcecastOutput) -> str:
+    minimum, maximum = bitrate_limits_for_output(output)
+    while True:
+        value = prompt_text("Bitrate (kbps): ", output.bitrate).strip()
+        if not value:
+            print("Enter the MP3 bitrate.")
+            continue
+        if not value.isdigit():
+            print("Enter the bitrate as a whole number.")
+            continue
+        bitrate = int(value)
+        if bitrate % 8 != 0:
+            print("The MP3 bitrate must be a multiple of 8.")
+            continue
+        if not minimum <= bitrate <= maximum:
+            print(f"Bitrate must be between {minimum} and {maximum} kbps for this platform.")
+            continue
+        return str(bitrate)
 
 
 def load_station_catalog() -> list[dict[str, str]]:
@@ -675,6 +720,84 @@ def wait_for_iqbus_state(target_state: str, timeout_seconds: float = 10.0) -> st
             return state
         time.sleep(0.2)
     return get_iqbus_active_state()
+
+
+def get_service_active_state(service_name: str) -> str:
+    result = run_command(["systemctl", "is-active", service_name], check=False)
+    return result.stdout.strip()
+
+
+def service_has_failed(service_name: str) -> bool:
+    return get_service_active_state(service_name) == "failed"
+
+
+def service_is_running(service_name: str) -> bool:
+    return get_service_active_state(service_name) == "active"
+
+
+def service_starts_on_boot(service_name: str) -> bool:
+    result = run_command(["systemctl", "is-enabled", service_name], check=False)
+    return result.stdout.strip() == "enabled"
+
+
+def wait_for_service_state(service_name: str, target_state: str, timeout_seconds: float = 10.0) -> str:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        state = get_service_active_state(service_name)
+        if state in {target_state, "failed"}:
+            return state
+        time.sleep(0.2)
+    return get_service_active_state(service_name)
+
+
+def report_failed_stream_service(callsign_lower: str) -> bool:
+    service_name = f"{callsign_lower}.service"
+    if service_has_failed(service_name):
+        print()
+        print(f"Error: Stream {callsign_lower.upper()} failed to start!")
+        return True
+    return False
+
+
+def start_stream_service(callsign_lower: str) -> bool:
+    service_name = f"{callsign_lower}.service"
+    start_result = run_command(["systemctl", "start", service_name], check=False)
+    if start_result.returncode != 0:
+        print()
+        print(f"Error: Stream {callsign_lower.upper()} failed to start!")
+        return False
+    if wait_for_service_state(service_name, "active") == "failed":
+        print()
+        print(f"Error: Stream {callsign_lower.upper()} failed to start!")
+        return False
+    print()
+    print(f"Stream {callsign_lower.upper()} started.")
+    return True
+
+
+def stop_stream_service(callsign_lower: str) -> None:
+    service_name = f"{callsign_lower}.service"
+    report_failed_stream_service(callsign_lower)
+    run_command(["systemctl", "stop", service_name], check=False)
+    if wait_for_service_state(service_name, "inactive") == "failed":
+        print()
+        print(f"Error: Stream {callsign_lower.upper()} failed to start!")
+        return
+    print()
+    print(f"Stream {callsign_lower.upper()} stopped.")
+
+
+def toggle_stream_start_on_boot(callsign_lower: str) -> None:
+    service_name = f"{callsign_lower}.service"
+    if service_starts_on_boot(service_name):
+        run_command(["systemctl", "disable", service_name])
+        print()
+        print("Start stream on host boot is now off.")
+        return
+
+    run_command(["systemctl", "enable", service_name])
+    print()
+    print("Start stream on host boot is now on.")
 
 
 def restart_iqbus_if_active() -> bool:
@@ -1216,7 +1339,16 @@ def prompt_output_port(current_value: str) -> str:
 
 
 def output_fields_complete(output: IcecastOutput) -> bool:
-    return all((output.server.strip(), output.port.strip(), output.username.strip(), output.password, output.mountpoint.strip()))
+    return all(
+        (
+            output.server.strip(),
+            output.port.strip(),
+            output.username.strip(),
+            output.password,
+            output.mountpoint.strip(),
+            output.bitrate.strip(),
+        )
+    )
 
 
 def build_output_options(output: IcecastOutput) -> list[str]:
@@ -1226,6 +1358,7 @@ def build_output_options(output: IcecastOutput) -> list[str]:
         f"Username: {output.username or '(blank)'}",
         f"Password: {'*' * len(output.password) if output.password else '(blank)'}",
         f"Mountpoint: {output.mountpoint or '(blank)'}",
+        f"Bitrate: {output.bitrate or '(blank)'} kbps",
     ]
     if output_fields_complete(output):
         options.append("Confirm")
@@ -1309,7 +1442,7 @@ def prompt_output_credentials(output: IcecastOutput) -> IcecastOutput | None:
             print(f"{index}. {option}")
 
         selection = input("Select an option: ").strip()
-        confirm_index = 6 if output_fields_complete(output) else None
+        confirm_index = 7 if output_fields_complete(output) else None
 
         if not selection:
             if confirm_index is None:
@@ -1331,6 +1464,8 @@ def prompt_output_credentials(output: IcecastOutput) -> IcecastOutput | None:
             return None
         if selected_index == 1:
             output.server = normalize_server_url(prompt_text("Server: ", output.server).strip())
+            if output_host(output).lower() == "radio-master.weatherusa.net" and not output.bitrate:
+                output.bitrate = "32"
         elif selected_index == 2:
             output.port = prompt_output_port(output.port)
         elif selected_index == 3:
@@ -1339,7 +1474,9 @@ def prompt_output_credentials(output: IcecastOutput) -> IcecastOutput | None:
             output.password = prompt_text("Password: ", output.password, hidden=True, allow_toggle=True)
         elif selected_index == 5:
             output.mountpoint = normalize_mountpoint(prompt_text("Mountpoint: ", output.mountpoint).strip())
-        elif selected_index == 6 and confirm_index == 6:
+        elif selected_index == 6:
+            output.bitrate = prompt_output_bitrate(output)
+        elif selected_index == 7 and confirm_index == 7:
             success, message = authenticate_output(output)
             print()
             print(message)
@@ -1392,6 +1529,153 @@ def ensure_shared_stream_assets() -> None:
     os.chmod(EAS_SCRIPT_TARGET_PATH, 0o755)
 
 
+def build_output_block(output: IcecastOutput) -> str:
+    parsed = urlparse(output.server)
+    host = parsed.hostname
+    if not host:
+        raise SetupError("Icecast server is invalid.")
+
+    block_lines = [
+        "output.icecast(",
+        f"  %mp3(bitrate={output.bitrate}, stereo=false, samplerate=16000),",
+        f'  host="{escape_liquidsoap_string(host)}",',
+        f"  port={output.port},",
+    ]
+    if parsed.scheme == "https":
+        block_lines.append('  protocol="https",')
+    block_lines.extend(
+        [
+            f'  user="{escape_liquidsoap_string(output.username)}",',
+            f'  password="{escape_liquidsoap_string(output.password)}",',
+            f'  mount="{escape_liquidsoap_string(output.mountpoint)}",',
+            "  name=callsign,",
+            '  description="#{site_name}, #{state_abbrev}",',
+            '  genre="Weather",',
+            "  public=true,",
+            "  radio",
+            ")",
+        ]
+    )
+    return "\n".join(block_lines)
+
+
+def find_matching_parenthesis(text: str, open_index: int) -> int:
+    depth = 0
+    in_string = False
+    escape = False
+    comment = False
+    for index in range(open_index, len(text)):
+        char = text[index]
+        if comment:
+            if char == "\n":
+                comment = False
+            continue
+        if in_string:
+            if escape:
+                escape = False
+                continue
+            if char == "\\":
+                escape = True
+                continue
+            if char == '"':
+                in_string = False
+            continue
+        if char == "#":
+            comment = True
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+    raise SetupError("Could not parse Liquidsoap output.icecast block.")
+
+
+def extract_liquidsoap_icecast_outputs(config_text: str) -> list[ParsedIcecastOutput]:
+    outputs = []
+    search_from = 0
+    while True:
+        start = config_text.find("output.icecast(", search_from)
+        if start == -1:
+            return outputs
+
+        open_index = config_text.find("(", start)
+        end = find_matching_parenthesis(config_text, open_index)
+        block = config_text[start : end + 1]
+        host_match = re.search(r'\bhost\s*=\s*"([^"]+)"', block)
+        port_match = re.search(r"\bport\s*=\s*(\d+)", block)
+        user_match = re.search(r'\buser\s*=\s*"([^"]*)"', block)
+        password_match = re.search(r'\bpassword\s*=\s*"([^"]*)"', block)
+        mount_match = re.search(r'\bmount\s*=\s*"([^"]+)"', block)
+        bitrate_match = re.search(r"%mp3\((?:[^()\"#]|\"[^\"]*\"|\([^()]*\))*\bbitrate\s*=\s*(\d+)", block, re.DOTALL)
+
+        if host_match and port_match and user_match and password_match and mount_match:
+            scheme = "https" if 'protocol="https"' in block or "http.transport.ssl()" in block else "http"
+            output = IcecastOutput(
+                server=f"{scheme}://{host_match.group(1)}",
+                port=port_match.group(1),
+                username=user_match.group(1),
+                password=password_match.group(1),
+                mountpoint=mount_match.group(1),
+                bitrate=bitrate_match.group(1) if bitrate_match else ("32" if host_match.group(1) == "radio-master.weatherusa.net" else "64"),
+            )
+            outputs.append(ParsedIcecastOutput(output=output, start=start, end=end + 1))
+
+        search_from = end + 1
+
+
+def read_stream_config(callsign_lower: str) -> str:
+    stream_path = LIQUIDSOAP_BIN_DIR / f"{callsign_lower}.liq"
+    try:
+        return stream_path.read_text(encoding="utf-8")
+    except FileNotFoundError as error:
+        raise SetupError(f"Stream config not found: {stream_path}") from error
+
+
+def write_stream_config(callsign_lower: str, config_text: str) -> None:
+    stream_path = LIQUIDSOAP_BIN_DIR / f"{callsign_lower}.liq"
+    stream_user = pwd.getpwnam(callsign_lower)
+    stream_group = grp.getgrnam(STREAM_GROUP)
+    stream_path.write_text(config_text, encoding="utf-8")
+    os.chown(stream_path, stream_user.pw_uid, stream_group.gr_gid)
+    os.chmod(stream_path, 0o750)
+
+
+def restart_stream_service(callsign_lower: str) -> None:
+    run_command(["systemctl", "restart", f"{callsign_lower}.service"])
+
+
+def delete_stream(callsign_lower: str) -> None:
+    response = input("Delete this stream? (y/n): ").strip().lower()
+    if response not in ("y", "yes"):
+        print("Stream was not deleted.")
+        return
+
+    service_name = f"{callsign_lower}.service"
+    service_path = STREAM_SERVICE_DIR / service_name
+    liq_path = LIQUIDSOAP_BIN_DIR / f"{callsign_lower}.liq"
+
+    run_command(["systemctl", "disable", "--now", service_name], check=False)
+    if service_path.exists():
+        service_path.unlink()
+    if liq_path.exists():
+        liq_path.unlink()
+    run_command(["systemctl", "daemon-reload"])
+    run_command(["pkill", "-u", callsign_lower], check=False)
+    run_command(["userdel", "-r", callsign_lower], check=False)
+
+    print()
+    print(f"Stream {callsign_lower.upper()} deleted.")
+
+
+def output_menu_label(output: IcecastOutput) -> str:
+    return f"{output.server} | {output.mountpoint}"
+
+
 def read_iqbus_stream_settings() -> tuple[str, int]:
     config_text = read_iqbus_config()
     port_value = get_config_value(config_text, "port")
@@ -1410,15 +1694,8 @@ def escape_liquidsoap_string(value: str) -> str:
 
 def build_stream_liquidsoap(station: dict[str, str], output: IcecastOutput) -> str:
     iqbus_host, iqbus_port = read_iqbus_stream_settings()
-    output_url = urlparse(output.server)
-    output_host = output_url.hostname
-    if not output_host:
-        raise SetupError("Icecast server is invalid.")
-
     template = load_template("stream.liq.template")
-    transport_line = ""
-    if output_url.scheme == "https":
-        transport_line = "transport=http.transport.ssl(),"
+    output_block = build_output_block(output)
 
     replacements = {
         "<IQBUS_SERVER>": escape_liquidsoap_string(iqbus_host),
@@ -1428,15 +1705,14 @@ def build_stream_liquidsoap(station: dict[str, str], output: IcecastOutput) -> s
         "<SITE_NAME>": escape_liquidsoap_string(station["site_name"]),
         "<STATE_ABBREV>": escape_liquidsoap_string(station["state"]),
         "<STATION_FREQ_HZ>": str(frequency_mhz_to_hz(station["frequency"])),
-        "<ICECAST_HOST>": escape_liquidsoap_string(output_host),
-        "<ICECAST_PORT>": output.port,
-        "<ICECAST_TRANSPORT_LINE>": transport_line,
-        "<ICECAST_USERNAME>": escape_liquidsoap_string(output.username),
-        "<ICECAST_PASSWORD>": escape_liquidsoap_string(output.password),
-        "<ICECAST_MOUNTPOINT>": escape_liquidsoap_string(output.mountpoint),
     }
     for placeholder, value in replacements.items():
         template = template.replace(placeholder, value)
+    start = template.find("output.icecast(")
+    if start == -1:
+        raise SetupError("Stream Liquidsoap template is missing an output.icecast block.")
+    end = find_matching_parenthesis(template, template.find("(", start))
+    template = template[:start] + output_block + template[end + 1 :]
     return template
 
 
@@ -1501,6 +1777,155 @@ def create_stream() -> None:
     print(f"Stream {station['callsign']} created and started.")
 
 
+def remove_output_from_stream(callsign_lower: str, parsed_output: ParsedIcecastOutput) -> None:
+    response = input("Remove this output? (y/n): ").strip().lower()
+    if response not in ("y", "yes"):
+        print("Output was not removed.")
+        return
+
+    config_text = read_stream_config(callsign_lower)
+    new_config = config_text[: parsed_output.start] + config_text[parsed_output.end :]
+    write_stream_config(callsign_lower, new_config)
+    restart_stream_service(callsign_lower)
+    print()
+    print("Output removed.")
+
+
+def update_output_in_stream(callsign_lower: str, parsed_output: ParsedIcecastOutput, output: IcecastOutput) -> None:
+    config_text = read_stream_config(callsign_lower)
+    replacement = build_output_block(output)
+    new_config = config_text[: parsed_output.start] + replacement + config_text[parsed_output.end :]
+    write_stream_config(callsign_lower, new_config)
+    restart_stream_service(callsign_lower)
+    print()
+    print("Output updated.")
+
+
+def append_output_to_stream(callsign_lower: str, output: IcecastOutput) -> None:
+    config_text = read_stream_config(callsign_lower)
+    block = build_output_block(output)
+    new_config = config_text.rstrip() + "\n\n" + block + "\n"
+    write_stream_config(callsign_lower, new_config)
+    restart_stream_service(callsign_lower)
+    print()
+    print("Output added.")
+
+
+def edit_output_menu(callsign_lower: str, parsed_output: ParsedIcecastOutput) -> None:
+    output = IcecastOutput(**vars(parsed_output.output))
+    while True:
+        print()
+        print("Edit Output")
+        print("0. Back")
+        options = [
+            f"Server: {output.server or '(blank)'}",
+            f"Port: {output.port or '(blank)'}",
+            f"Username: {output.username or '(blank)'}",
+            f"Password: {'*' * len(output.password) if output.password else '(blank)'}",
+            f"Mountpoint: {output.mountpoint or '(blank)'}",
+            f"Bitrate: {output.bitrate or '(blank)'} kbps",
+        ]
+        confirm_index = None
+        if output_fields_complete(output):
+            options.append("Confirm")
+            confirm_index = len(options)
+        options.append("Remove Output")
+        remove_index = len(options)
+        for index, option in enumerate(options, start=1):
+            print(f"{index}. {option}")
+
+        selection = input("Select an option: ").strip()
+        if not selection:
+            if not output_fields_complete(output):
+                print("One or more fields are left blank.")
+                continue
+            success, message = authenticate_output(output)
+            print()
+            print(message)
+            if success:
+                update_output_in_stream(callsign_lower, parsed_output, output)
+                return
+            continue
+
+        if not selection.isdigit():
+            print("Enter the number for the option you want.")
+            continue
+
+        selected_index = int(selection)
+        if selected_index == 0:
+            return
+        if selected_index == 1:
+            output.server = normalize_server_url(prompt_text("Server: ", output.server).strip())
+        elif selected_index == 2:
+            output.port = prompt_output_port(output.port)
+        elif selected_index == 3:
+            output.username = prompt_text("Username: ", output.username).strip()
+        elif selected_index == 4:
+            output.password = prompt_text("Password: ", output.password, hidden=True, allow_toggle=True)
+        elif selected_index == 5:
+            output.mountpoint = normalize_mountpoint(prompt_text("Mountpoint: ", output.mountpoint).strip())
+        elif selected_index == 6:
+            output.bitrate = prompt_output_bitrate(output)
+        elif confirm_index is not None and selected_index == confirm_index:
+            success, message = authenticate_output(output)
+            print()
+            print(message)
+            if success:
+                update_output_in_stream(callsign_lower, parsed_output, output)
+                return
+        elif selected_index == remove_index:
+            remove_output_from_stream(callsign_lower, parsed_output)
+            return
+        else:
+            print("That selection is not available.")
+
+
+def outputs_menu(callsign_lower: str) -> None:
+    while True:
+        parsed_outputs = extract_liquidsoap_icecast_outputs(read_stream_config(callsign_lower))
+        options = [output_menu_label(parsed.output) for parsed in parsed_outputs]
+        options.append("Add output")
+        selection = prompt_menu_with_back("Outputs", options, "Back to stream menu")
+        if selection == -1:
+            return
+        if selection == len(options) - 1:
+            output = prompt_icecast_output()
+            if output is not None:
+                append_output_to_stream(callsign_lower, output)
+        else:
+            edit_output_menu(callsign_lower, parsed_outputs[selection])
+
+
+def stream_menu(callsign: str) -> None:
+    callsign_lower = callsign.lower()
+    while True:
+        service_name = f"{callsign_lower}.service"
+        report_failed_stream_service(callsign_lower)
+        stream_running = service_is_running(service_name)
+        start_on_boot = service_starts_on_boot(service_name)
+        options = [
+            "Outputs",
+            "Stop Stream" if stream_running else "Start Stream",
+            f"Start Stream On Host Boot: {'on' if start_on_boot else 'off'}",
+            "Delete Stream",
+        ]
+        selection = prompt_menu_with_back("Manage Stream", options, "Back to streams")
+        if selection == -1:
+            return
+        if selection == 0:
+            outputs_menu(callsign_lower)
+        elif selection == 1:
+            if stream_running:
+                stop_stream_service(callsign_lower)
+            else:
+                start_stream_service(callsign_lower)
+        elif selection == 2:
+            toggle_stream_start_on_boot(callsign_lower)
+        elif selection == 3:
+            delete_stream(callsign_lower)
+            return
+
+
 def manage_streams() -> None:
     while True:
         existing_streams = list_existing_streams()
@@ -1512,8 +1937,7 @@ def manage_streams() -> None:
         if selection == len(options) - 1:
             create_stream()
         else:
-            print()
-            print(f"Editing existing stream {existing_streams[selection]} is not implemented yet.")
+            stream_menu(existing_streams[selection])
 
 
 def main_menu() -> int:
