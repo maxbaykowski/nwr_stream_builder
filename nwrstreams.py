@@ -1955,6 +1955,20 @@ def normalize_stream_audio_settings(values: dict[str, object] | None = None) -> 
     return settings
 
 
+def liquidsoap_persistent_variables_payload(settings: dict[str, float]) -> dict[str, object]:
+    normalized = normalize_stream_audio_settings(settings)
+    return {
+        "bool": [],
+        "float": [
+            ["audio_volume", normalized["audio_volume"]],
+            ["audio_low_pass", normalized["audio_low_pass"]],
+            ["audio_high_pass", normalized["audio_high_pass"]],
+        ],
+        "int": [],
+        "string": [],
+    }
+
+
 def read_stream_audio_settings_payload(callsign_lower: str) -> object | None:
     path = stream_variables_path(callsign_lower)
     if not path.exists():
@@ -1967,6 +1981,18 @@ def read_stream_audio_settings_payload(callsign_lower: str) -> object | None:
 
 def read_stream_audio_settings(callsign_lower: str) -> dict[str, float]:
     payload = read_stream_audio_settings_payload(callsign_lower)
+    if isinstance(payload, dict):
+        float_values = payload.get("float")
+        if isinstance(float_values, list):
+            extracted: dict[str, object] = {}
+            for item in float_values:
+                if (
+                    isinstance(item, list)
+                    and len(item) == 2
+                    and isinstance(item[0], str)
+                ):
+                    extracted[item[0]] = item[1]
+            return normalize_stream_audio_settings(extracted)
     if isinstance(payload, list) and payload and isinstance(payload[0], dict):
         return normalize_stream_audio_settings(payload[0])
     if isinstance(payload, dict):
@@ -1977,22 +2003,7 @@ def read_stream_audio_settings(callsign_lower: str) -> dict[str, float]:
 def write_stream_audio_settings(callsign_lower: str, settings: dict[str, float]) -> None:
     path = stream_variables_path(callsign_lower)
     normalized = normalize_stream_audio_settings(settings)
-    payload = read_stream_audio_settings_payload(callsign_lower)
-
-    if isinstance(payload, list):
-        existing = list(payload)
-        if existing and isinstance(existing[0], dict):
-            existing[0] = {**existing[0], **normalized}
-        elif existing:
-            existing[0] = normalized
-        else:
-            existing = [normalized]
-        while len(existing) < 4:
-            existing.append([])
-        payload_to_write = existing
-    else:
-        payload_to_write = [normalized, [], [], []]
-
+    payload_to_write = liquidsoap_persistent_variables_payload(normalized)
     path.write_text(json.dumps(payload_to_write, indent=2) + "\n", encoding="utf-8")
 
 
@@ -2012,8 +2023,7 @@ def ensure_stream_state_layout(callsign_lower: str) -> None:
         os.chmod(path, 0o750)
 
     variables_path = stream_variables_path(callsign_lower)
-    if not variables_path.exists():
-        write_stream_audio_settings(callsign_lower, default_stream_audio_settings())
+    write_stream_audio_settings(callsign_lower, read_stream_audio_settings(callsign_lower))
     os.chown(variables_path, stream_user.pw_uid, stream_group.gr_gid)
     os.chmod(variables_path, 0o640)
 
