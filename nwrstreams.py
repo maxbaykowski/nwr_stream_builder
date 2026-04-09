@@ -1400,6 +1400,18 @@ def show_submission_notice(url: str) -> None:
             return
 
 
+def show_noaa_radio_org_submission_notice() -> None:
+    print()
+    print(
+        "Now that the stream is up and running, you must now submit a stream "
+        f"to {NOAA_RADIO_ORG_SUBMISSION_URL} if you have not done so already."
+    )
+    print("Press Enter to continue.")
+    while True:
+        if input() == "":
+            return
+
+
 def show_noaa_radio_org_lookup_notice() -> None:
     print()
     print(f"Use the NOAA Weather Radio Org station lookup tool to check for mountpoint conflicts: {NOAA_RADIO_ORG_LOOKUP_URL}")
@@ -1631,7 +1643,7 @@ def prompt_output_credentials(
             print(message)
             if success:
                 if provider == "noaa_radio_org":
-                    show_submission_notice(NOAA_RADIO_ORG_SUBMISSION_URL)
+                    show_noaa_radio_org_submission_notice()
                 return output
             continue
 
@@ -1667,7 +1679,7 @@ def prompt_output_credentials(
             print(message)
             if success:
                 if provider == "noaa_radio_org":
-                    show_submission_notice(NOAA_RADIO_ORG_SUBMISSION_URL)
+                    show_noaa_radio_org_submission_notice()
                 return output
         else:
             print("That selection is not available.")
@@ -2098,7 +2110,7 @@ def edit_output_menu(
             print(message)
             if success:
                 if provider == "noaa_radio_org":
-                    show_submission_notice(NOAA_RADIO_ORG_SUBMISSION_URL)
+                    show_noaa_radio_org_submission_notice()
                 update_output_in_stream(callsign_lower, parsed_output, output)
                 return
         elif selected_index == remove_index:
