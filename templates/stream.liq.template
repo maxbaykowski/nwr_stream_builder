@@ -1,4 +1,7 @@
 #!/usr/bin/env liquidsoap
+settings.server.socket := true
+settings.server.socket.path := "<CONTROL_SOCKET_PATH>"
+settings.server.socket.permissions := 432
 server="<IQBUS_SERVER>"
 port=<IQBUS_PORT>
 callsign="<CALLSIGN>"
@@ -6,6 +9,31 @@ site_name="<SITE_NAME>"
 state_abbrev="<STATE_ABBREV>"
 samplerate=16000
 freq=<STATION_FREQ_HZ>
+variables_path="<VARIABLES_PATH>"
+audio_volume = interactive.float(
+  "audio_volume",
+  description="Audio volume",
+  min=0.,
+  max=2.,
+  1.
+)
+audio_low_pass = interactive.float(
+  "audio_low_pass",
+  description="Audio low pass",
+  unit="Hz",
+  min=1000.,
+  max=4000.,
+  3000.
+)
+audio_high_pass = interactive.float(
+  "audio_high_pass",
+  description="Audio high pass",
+  unit="Hz",
+  min=0.,
+  max=200.,
+  0.
+)
+interactive.persistent(variables_path)
 radio = input.external.rawaudio(
   samplerate=16000,
   channels=1,
@@ -16,7 +44,9 @@ radio = input.external.rawaudio(
   "sdr_server_client -k #{server} -p #{port} -s #{samplerate} -b 162475000 -f #{freq} - | csdr fmdemod | csdr deemphasis --wfm 16000 530e-6 | csdr convert -ifloat -os16"
   )
 emergency = single("/usr/local/share/nwr/fallback.wav")
-radio = filter(freq=3000.0, mode="low", q=1.0, radio)
+radio = filter(freq=audio_low_pass, mode="low", q=1.0, radio)
+radio = filter(freq=audio_high_pass, mode="high", q=1.0, radio)
+radio = amplify(audio_volume, radio)
 radio = fallback([radio, emergency])
 encoder = %mp3(bitrate=64, stereo=false, samplerate=16000)
 
@@ -25,7 +55,7 @@ rawaudio = %wav(header=false, stereo=false, samplesize=16, samplerate=16000)
 #EAS logging output
 output.external(
   rawaudio,
-  "python3 /usr/local/bin/easrecorder.py --rate 16000 --max-seconds 300 --pre-seconds 10 --post-seconds 10 --outdir /var/lib/easrecorder/<CALLSIGN_LOWER> --mp3 --local-time",
+  "python3 /usr/local/bin/easrecorder.py --rate 16000 --max-seconds 300 --pre-seconds 10 --post-seconds 10 --outdir <EAS_RECORDINGS_PATH> --mp3 --local-time",
   radio)
 
 #Ice Cast output

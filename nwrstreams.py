@@ -70,6 +70,12 @@ GWES_SUBMISSION_URL = "https://forms.office.com/r/MLx6hKmnCe"
 WEATHER_USA_SUBMISSION_URL = "https://www.weatherusa.net/members/services/radio"
 NOAA_RADIO_ORG_LOOKUP_URL = "https://noaaweatherradio.org/N2radio-finder.php"
 NOAA_RADIO_ORG_SUBMISSION_URL = "http://noaaweatherradio.org/addstream/addstream.html"
+NWR_STREAM_STATE_ROOT = Path("/var/lib/nwrstreams")
+STREAM_SOCKET_NAME = "liquidsoap.sock"
+STREAM_VARIABLES_FILE_NAME = "variables.json"
+DEFAULT_AUDIO_VOLUME = 1.0
+DEFAULT_AUDIO_LOW_PASS = 3000.0
+DEFAULT_AUDIO_HIGH_PASS = 0.0
 
 
 @dataclass
@@ -1870,6 +1876,9 @@ def delete_stream(callsign_lower: str) -> None:
         service_path.unlink()
     if liq_path.exists():
         liq_path.unlink()
+    state_dir = stream_state_dir(callsign_lower)
+    if state_dir.exists():
+        shutil.rmtree(state_dir)
     run_command(["systemctl", "daemon-reload"])
     run_command(["pkill", "-u", callsign_lower], check=False)
     run_command(["userdel", "-r", callsign_lower], check=False)
@@ -1898,19 +1907,210 @@ def escape_liquidsoap_string(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def stream_state_dir(callsign_lower: str) -> Path:
+    return NWR_STREAM_STATE_ROOT / callsign_lower
+
+
+def stream_data_dir(callsign_lower: str) -> Path:
+    return stream_state_dir(callsign_lower) / "data"
+
+
+def stream_variables_path(callsign_lower: str) -> Path:
+    return stream_data_dir(callsign_lower) / STREAM_VARIABLES_FILE_NAME
+
+
+def stream_socket_path(callsign_lower: str) -> Path:
+    return stream_state_dir(callsign_lower) / STREAM_SOCKET_NAME
+
+
+def stream_eas_recordings_dir(callsign_lower: str) -> Path:
+    return stream_state_dir(callsign_lower) / "eas_recordings"
+
+
+def default_stream_audio_settings() -> dict[str, float]:
+    return {
+        "audio_volume": DEFAULT_AUDIO_VOLUME,
+        "audio_low_pass": DEFAULT_AUDIO_LOW_PASS,
+        "audio_high_pass": DEFAULT_AUDIO_HIGH_PASS,
+    }
+
+
+def normalize_stream_audio_settings(values: dict[str, object] | None = None) -> dict[str, float]:
+    settings = default_stream_audio_settings()
+    if values is None:
+        return settings
+
+    for key, default_value in settings.items():
+        raw_value = values.get(key)
+        if raw_value is None:
+            continue
+        try:
+            settings[key] = float(raw_value)
+        except (TypeError, ValueError):
+            settings[key] = default_value
+
+    settings["audio_volume"] = max(0.0, min(2.0, settings["audio_volume"]))
+    settings["audio_low_pass"] = max(1000.0, min(4000.0, settings["audio_low_pass"]))
+    settings["audio_high_pass"] = max(0.0, min(200.0, settings["audio_high_pass"]))
+    return settings
+
+
+def read_stream_audio_settings_payload(callsign_lower: str) -> object | None:
+    path = stream_variables_path(callsign_lower)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def read_stream_audio_settings(callsign_lower: str) -> dict[str, float]:
+    payload = read_stream_audio_settings_payload(callsign_lower)
+    if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+        return normalize_stream_audio_settings(payload[0])
+    if isinstance(payload, dict):
+        return normalize_stream_audio_settings(payload)
+    return default_stream_audio_settings()
+
+
+def write_stream_audio_settings(callsign_lower: str, settings: dict[str, float]) -> None:
+    path = stream_variables_path(callsign_lower)
+    normalized = normalize_stream_audio_settings(settings)
+    payload = read_stream_audio_settings_payload(callsign_lower)
+
+    if isinstance(payload, list):
+        existing = list(payload)
+        if existing and isinstance(existing[0], dict):
+            existing[0] = {**existing[0], **normalized}
+        elif existing:
+            existing[0] = normalized
+        else:
+            existing = [normalized]
+        while len(existing) < 4:
+            existing.append([])
+        payload_to_write = existing
+    else:
+        payload_to_write = [normalized, [], [], []]
+
+    path.write_text(json.dumps(payload_to_write, indent=2) + "\n", encoding="utf-8")
+
+
+def ensure_stream_state_layout(callsign_lower: str) -> None:
+    state_dir = stream_state_dir(callsign_lower)
+    data_dir = stream_data_dir(callsign_lower)
+    eas_dir = stream_eas_recordings_dir(callsign_lower)
+
+    state_dir.mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    eas_dir.mkdir(parents=True, exist_ok=True)
+
+    stream_user = pwd.getpwnam(callsign_lower)
+    stream_group = grp.getgrnam(STREAM_GROUP)
+    for path in (state_dir, data_dir, eas_dir):
+        os.chown(path, stream_user.pw_uid, stream_group.gr_gid)
+        os.chmod(path, 0o750)
+
+    variables_path = stream_variables_path(callsign_lower)
+    if not variables_path.exists():
+        write_stream_audio_settings(callsign_lower, default_stream_audio_settings())
+    os.chown(variables_path, stream_user.pw_uid, stream_group.gr_gid)
+    os.chmod(variables_path, 0o640)
+
+
+def format_audio_float(value: float) -> str:
+    formatted = f"{value:.3f}".rstrip("0").rstrip(".")
+    if "." not in formatted:
+        formatted = f"{formatted}.0"
+    return formatted
+
+
+def extract_stream_metadata_from_config(callsign_lower: str, config_text: str) -> dict[str, str]:
+    callsign_match = re.search(r'^callsign="([^"]+)"', config_text, re.MULTILINE)
+    site_name_match = re.search(r'^site_name="([^"]+)"', config_text, re.MULTILINE)
+    state_match = re.search(r'^state_abbrev="([^"]+)"', config_text, re.MULTILINE)
+    freq_match = re.search(r"^freq=(\d+)", config_text, re.MULTILINE)
+    if not (callsign_match and site_name_match and state_match and freq_match):
+        raise SetupError(f"Could not extract stream metadata from {callsign_lower}.liq.")
+
+    frequency_mhz = Decimal(freq_match.group(1)) / Decimal("1000000")
+    return {
+        "callsign": callsign_match.group(1),
+        "site_name": site_name_match.group(1),
+        "state": state_match.group(1),
+        "frequency": format(frequency_mhz.normalize(), "f"),
+    }
+
+
+def ensure_stream_liquidsoap_controls(callsign_lower: str) -> bool:
+    config_text = read_stream_config(callsign_lower)
+    if (
+        'settings.server.socket := true' in config_text
+        and 'interactive.persistent(variables_path)' in config_text
+        and 'audio_volume = interactive.float(' in config_text
+    ):
+        return False
+
+    outputs = extract_liquidsoap_icecast_outputs(config_text)
+    if not outputs:
+        raise SetupError(f"Could not upgrade {callsign_lower}.liq because no Icecast outputs were found.")
+
+    metadata = extract_stream_metadata_from_config(callsign_lower, config_text)
+    rebuilt_config = build_stream_liquidsoap(metadata, outputs[0].output)
+    for parsed_output in outputs[1:]:
+        rebuilt_config = rebuilt_config.rstrip() + "\n\n" + build_output_block(parsed_output.output) + "\n"
+    write_stream_config(callsign_lower, rebuilt_config)
+    return True
+
+
+def send_liquidsoap_socket_command(callsign_lower: str, command: str) -> None:
+    socket_path = stream_socket_path(callsign_lower)
+    if not socket_path.exists():
+        raise SetupError(f"Liquidsoap control socket not found: {socket_path}")
+
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(5)
+        client.connect(str(socket_path))
+        client.sendall(f"{command}\nexit\n".encode("utf-8"))
+        while True:
+            try:
+                chunk = client.recv(4096)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+
+
+def set_stream_audio_setting(callsign_lower: str, key: str, value: float) -> None:
+    settings = read_stream_audio_settings(callsign_lower)
+    settings[key] = value
+    write_stream_audio_settings(callsign_lower, settings)
+
+    service_name = f"{callsign_lower}.service"
+    if service_is_running(service_name):
+        try:
+            send_liquidsoap_socket_command(callsign_lower, f"var.set {key} = {format_audio_float(value)}")
+        except SetupError as error:
+            print(f"Saved the setting, but could not apply it live: {error}")
+
+
 def build_stream_liquidsoap(station: dict[str, str], output: IcecastOutput) -> str:
     iqbus_host, iqbus_port = read_iqbus_stream_settings()
     template = load_template("stream.liq.template")
     output_block = build_output_block(output)
+    callsign_lower = station["callsign"].lower()
 
     replacements = {
         "<IQBUS_SERVER>": escape_liquidsoap_string(iqbus_host),
         "<IQBUS_PORT>": str(iqbus_port),
         "<CALLSIGN>": escape_liquidsoap_string(station["callsign"]),
-        "<CALLSIGN_LOWER>": station["callsign"].lower(),
+        "<CALLSIGN_LOWER>": callsign_lower,
         "<SITE_NAME>": escape_liquidsoap_string(station["site_name"]),
         "<STATE_ABBREV>": escape_liquidsoap_string(station["state"]),
         "<STATION_FREQ_HZ>": str(frequency_mhz_to_hz(station["frequency"])),
+        "<CONTROL_SOCKET_PATH>": escape_liquidsoap_string(str(stream_socket_path(callsign_lower))),
+        "<VARIABLES_PATH>": escape_liquidsoap_string(str(stream_variables_path(callsign_lower))),
+        "<EAS_RECORDINGS_PATH>": escape_liquidsoap_string(str(stream_eas_recordings_dir(callsign_lower))),
     }
     for placeholder, value in replacements.items():
         template = template.replace(placeholder, value)
@@ -1931,6 +2131,23 @@ def build_stream_service(callsign_lower: str) -> str:
     for placeholder, value in replacements.items():
         template = template.replace(placeholder, value)
     return template
+
+
+def ensure_stream_service_layout(callsign_lower: str) -> bool:
+    service_path = STREAM_SERVICE_DIR / f"{callsign_lower}.service"
+    expected_text = build_stream_service(callsign_lower)
+    try:
+        current_text = service_path.read_text(encoding="utf-8")
+    except FileNotFoundError as error:
+        raise SetupError(f"Stream service not found: {service_path}") from error
+
+    if current_text == expected_text:
+        return False
+
+    service_path.write_text(expected_text, encoding="utf-8")
+    os.chown(service_path, 0, 0)
+    os.chmod(service_path, 0o644)
+    return True
 
 
 def ensure_stream_user(callsign_lower: str) -> None:
@@ -1974,6 +2191,7 @@ def create_stream() -> None:
     callsign_lower = station["callsign"].lower()
     ensure_stream_user(callsign_lower)
     ensure_shared_stream_assets()
+    ensure_stream_state_layout(callsign_lower)
     liquidsoap_text = build_stream_liquidsoap(station, output)
     service_text = build_stream_service(callsign_lower)
     write_stream_files(callsign_lower, liquidsoap_text, service_text)
@@ -2015,6 +2233,62 @@ def append_output_to_stream(callsign_lower: str, output: IcecastOutput) -> None:
     restart_stream_service(callsign_lower)
     print()
     print("Output added.")
+
+
+def prompt_audio_volume(current_value: float) -> float:
+    while True:
+        value = prompt_text("Audio volume: ", format_audio_float(current_value)).strip()
+        try:
+            parsed = float(value)
+        except ValueError:
+            print("Enter the volume as a number between 0.0 and 2.0.")
+            continue
+        if not 0.0 <= parsed <= 2.0:
+            print("Audio volume must be between 0.0 and 2.0.")
+            continue
+        return parsed
+
+
+def prompt_audio_frequency(label: str, current_value: float, minimum: int, maximum: int) -> float:
+    while True:
+        value = prompt_text(f"{label}: ", str(int(round(current_value)))).strip()
+        if not value.isdigit():
+            print(f"Enter {label.lower()} as a whole number.")
+            continue
+        parsed = int(value)
+        if not minimum <= parsed <= maximum:
+            print(f"{label} must be between {minimum} and {maximum} Hz.")
+            continue
+        return float(parsed)
+
+
+def audio_settings_menu(callsign_lower: str) -> None:
+    ensure_stream_state_layout(callsign_lower)
+    while True:
+        settings = read_stream_audio_settings(callsign_lower)
+        selection = prompt_menu_with_back(
+            "Audio Settings",
+            [
+                f"Audio Volume: {format_audio_float(settings['audio_volume'])}",
+                f"Audio Low Pass: {int(round(settings['audio_low_pass']))} Hz",
+                f"Audio High Pass: {int(round(settings['audio_high_pass']))} Hz",
+            ],
+            "Back to stream menu",
+        )
+        if selection == -1:
+            return
+        if selection == 0:
+            value = prompt_audio_volume(settings["audio_volume"])
+            set_stream_audio_setting(callsign_lower, "audio_volume", value)
+            print(f"Audio volume set to {format_audio_float(value)}.")
+        elif selection == 1:
+            value = prompt_audio_frequency("Audio low pass", settings["audio_low_pass"], 1000, 4000)
+            set_stream_audio_setting(callsign_lower, "audio_low_pass", value)
+            print(f"Audio low pass set to {int(value)} Hz.")
+        elif selection == 2:
+            value = prompt_audio_frequency("Audio high pass", settings["audio_high_pass"], 0, 200)
+            set_stream_audio_setting(callsign_lower, "audio_high_pass", value)
+            print(f"Audio high pass set to {int(value)} Hz.")
 
 
 def edit_output_menu(
@@ -2139,6 +2413,13 @@ def outputs_menu(callsign_lower: str, station: dict[str, str] | None) -> None:
 def stream_menu(callsign: str) -> None:
     callsign_lower = callsign.lower()
     station = get_station_by_callsign(callsign)
+    ensure_stream_state_layout(callsign_lower)
+    updated_service = ensure_stream_service_layout(callsign_lower)
+    upgraded_config = ensure_stream_liquidsoap_controls(callsign_lower)
+    if updated_service:
+        run_command(["systemctl", "daemon-reload"])
+    if (updated_service or upgraded_config) and service_is_running(f"{callsign_lower}.service"):
+        restart_stream_service(callsign_lower)
     while True:
         service_name = f"{callsign_lower}.service"
         report_failed_stream_service(callsign_lower)
@@ -2146,6 +2427,7 @@ def stream_menu(callsign: str) -> None:
         start_on_boot = service_starts_on_boot(service_name)
         options = [
             "Outputs",
+            "Audio settings",
             "Stop Stream" if stream_running else "Start Stream",
             f"Start Stream On Host Boot: {'on' if start_on_boot else 'off'}",
             "Delete Stream",
@@ -2156,13 +2438,15 @@ def stream_menu(callsign: str) -> None:
         if selection == 0:
             outputs_menu(callsign_lower, station)
         elif selection == 1:
+            audio_settings_menu(callsign_lower)
+        elif selection == 2:
             if stream_running:
                 stop_stream_service(callsign_lower)
             else:
                 start_stream_service(callsign_lower)
-        elif selection == 2:
-            toggle_stream_start_on_boot(callsign_lower)
         elif selection == 3:
+            toggle_stream_start_on_boot(callsign_lower)
+        elif selection == 4:
             delete_stream(callsign_lower)
             return
 
