@@ -838,7 +838,7 @@ def report_failed_stream_service(callsign_lower: str) -> bool:
     service_name = f"{callsign_lower}.service"
     if service_has_failed(service_name):
         print()
-        print(f"Error: Stream {callsign_lower.upper()} failed to start!")
+        print(f"Error: Stream {callsign_lower.upper()} is in a failed state.")
         return True
     return False
 
@@ -868,7 +868,10 @@ def stop_stream_service(callsign_lower: str) -> None:
     service_name = f"{callsign_lower}.service"
     stop_result = run_command(["systemctl", "stop", service_name], check=False)
     state = wait_for_service_state(service_name, "inactive")
-    if stop_result.returncode != 0 or state == "failed":
+    if state == "failed":
+        run_command(["systemctl", "reset-failed", service_name], check=False)
+        state = wait_for_service_state(service_name, "inactive")
+    if stop_result.returncode != 0 or state != "inactive":
         report_stream_stop_failure(callsign_lower)
         return
     print()
