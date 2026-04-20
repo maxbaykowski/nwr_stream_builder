@@ -76,6 +76,7 @@ STREAM_VARIABLES_FILE_NAME = "variables.json"
 DEFAULT_AUDIO_VOLUME = 1.0
 DEFAULT_AUDIO_LOW_PASS = 3000.0
 DEFAULT_AUDIO_HIGH_PASS = 0.0
+DEFAULT_FALLBACK_DELAY = 30.0
 
 
 @dataclass
@@ -1932,6 +1933,7 @@ def default_stream_audio_settings() -> dict[str, float]:
         "audio_volume": DEFAULT_AUDIO_VOLUME,
         "audio_low_pass": DEFAULT_AUDIO_LOW_PASS,
         "audio_high_pass": DEFAULT_AUDIO_HIGH_PASS,
+        "fallback_delay": DEFAULT_FALLBACK_DELAY,
     }
 
 
@@ -1952,6 +1954,7 @@ def normalize_stream_audio_settings(values: dict[str, object] | None = None) -> 
     settings["audio_volume"] = max(0.0, min(2.0, settings["audio_volume"]))
     settings["audio_low_pass"] = max(1000.0, min(4000.0, settings["audio_low_pass"]))
     settings["audio_high_pass"] = max(0.0, min(200.0, settings["audio_high_pass"]))
+    settings["fallback_delay"] = max(30.0, min(120.0, settings["fallback_delay"]))
     return settings
 
 
@@ -1963,6 +1966,7 @@ def liquidsoap_persistent_variables_payload(settings: dict[str, float]) -> dict[
             ["audio_volume", normalized["audio_volume"]],
             ["audio_low_pass", normalized["audio_low_pass"]],
             ["audio_high_pass", normalized["audio_high_pass"]],
+            ["fallback_delay", normalized["fallback_delay"]],
         ],
         "int": [],
         "string": [],
@@ -2058,6 +2062,9 @@ def ensure_stream_liquidsoap_controls(callsign_lower: str) -> bool:
         'settings.server.socket := true' in config_text
         and 'interactive.persistent(variables_path)' in config_text
         and 'audio_volume = interactive.float(' in config_text
+        and 'fallback_delay = interactive.float(' in config_text
+        and 'radio = mksafe(radio)' in config_text
+        and 'blank.strip(max_blank=fallback_delay, track_sensitive=false, radio)' in config_text
     ):
         return False
 
@@ -2272,6 +2279,19 @@ def prompt_audio_frequency(label: str, current_value: float, minimum: int, maxim
         return float(parsed)
 
 
+def prompt_fallback_delay(current_value: float) -> float:
+    while True:
+        value = prompt_text("Fallback delay (seconds): ", str(int(round(current_value)))).strip()
+        if not value.isdigit():
+            print("Enter the fallback delay as a whole number of seconds.")
+            continue
+        parsed = int(value)
+        if not 30 <= parsed <= 120:
+            print("Fallback delay must be between 30 and 120 seconds.")
+            continue
+        return float(parsed)
+
+
 def audio_settings_menu(callsign_lower: str) -> None:
     ensure_stream_state_layout(callsign_lower)
     while True:
@@ -2282,6 +2302,7 @@ def audio_settings_menu(callsign_lower: str) -> None:
                 f"Audio Volume: {format_audio_float(settings['audio_volume'])}",
                 f"Audio Low Pass: {int(round(settings['audio_low_pass']))} Hz",
                 f"Audio High Pass: {int(round(settings['audio_high_pass']))} Hz",
+                f"Fallback Delay: {int(round(settings['fallback_delay']))} seconds",
             ],
             "Back to stream menu",
         )
@@ -2299,6 +2320,10 @@ def audio_settings_menu(callsign_lower: str) -> None:
             value = prompt_audio_frequency("Audio high pass", settings["audio_high_pass"], 0, 200)
             set_stream_audio_setting(callsign_lower, "audio_high_pass", value)
             print(f"Audio high pass set to {int(value)} Hz.")
+        elif selection == 3:
+            value = prompt_fallback_delay(settings["fallback_delay"])
+            set_stream_audio_setting(callsign_lower, "fallback_delay", value)
+            print(f"Fallback delay set to {int(value)} seconds.")
 
 
 def edit_output_menu(

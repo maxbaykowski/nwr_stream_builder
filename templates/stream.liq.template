@@ -33,6 +33,14 @@ audio_high_pass = interactive.float(
   max=200.,
   0.
 )
+fallback_delay = interactive.float(
+  "fallback_delay",
+  description="Fallback delay",
+  unit="s",
+  min=30.,
+  max=120.,
+  30.
+)
 interactive.persistent(variables_path)
 radio = input.external.rawaudio(
   samplerate=16000,
@@ -47,7 +55,9 @@ emergency = single("/usr/local/share/nwr/fallback.wav")
 radio = filter(freq=audio_low_pass, mode="low", q=1.0, radio)
 radio = filter(freq=audio_high_pass, mode="high", q=1.0, radio)
 radio = amplify(audio_volume, radio)
-radio = fallback([radio, emergency])
+radio = mksafe(radio)
+radio = blank.strip(max_blank=fallback_delay, track_sensitive=false, radio)
+radio = fallback(track_sensitive=false, [radio, emergency])
 encoder = %mp3(bitrate=64, stereo=false, samplerate=16000)
 
 # This is only for EAS logging (if desired)
