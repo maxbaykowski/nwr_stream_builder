@@ -843,6 +843,11 @@ def report_failed_stream_service(callsign_lower: str) -> bool:
     return False
 
 
+def report_stream_stop_failure(callsign_lower: str) -> None:
+    print()
+    print(f"Error: Stream {callsign_lower.upper()} failed to stop!")
+
+
 def start_stream_service(callsign_lower: str) -> bool:
     service_name = f"{callsign_lower}.service"
     start_result = run_command(["systemctl", "start", service_name], check=False)
@@ -861,11 +866,10 @@ def start_stream_service(callsign_lower: str) -> bool:
 
 def stop_stream_service(callsign_lower: str) -> None:
     service_name = f"{callsign_lower}.service"
-    report_failed_stream_service(callsign_lower)
-    run_command(["systemctl", "stop", service_name], check=False)
-    if wait_for_service_state(service_name, "inactive") == "failed":
-        print()
-        print(f"Error: Stream {callsign_lower.upper()} failed to start!")
+    stop_result = run_command(["systemctl", "stop", service_name], check=False)
+    state = wait_for_service_state(service_name, "inactive")
+    if stop_result.returncode != 0 or state == "failed":
+        report_stream_stop_failure(callsign_lower)
         return
     print()
     print(f"Stream {callsign_lower.upper()} stopped.")
