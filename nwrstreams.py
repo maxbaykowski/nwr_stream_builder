@@ -45,6 +45,9 @@ IQBUS_GROUP = "plugdev"
 STREAM_GROUP = "broadcasters"
 IQBUS_CONFIG_PATH = Path("/etc/iqbus.config")
 IQBUS_SERVICE_PATH = Path("/etc/systemd/system/iqbus.service")
+IQBUS_UDEV_RULES_PATH = Path("/etc/udev/rules.d/99-iqbus-rtl-sdr.rules")
+IQBUS_UDEV_HELPER_PATH = Path("/usr/local/bin/iqbus-udev-handler.sh")
+IQBUS_UDEV_STATE_PATH = Path("/run/iqbus-udev-was-active")
 STREAM_SERVICE_DIR = Path("/etc/systemd/system")
 LIQUIDSOAP_BIN_DIR = Path("/usr/local/bin")
 FALLBACK_TARGET_DIR = Path("/usr/local/share/nwr")
@@ -752,6 +755,88 @@ def build_iqbus_service() -> str:
     return service_text
 
 
+def build_iqbus_udev_helper() -> str:
+    return """#!/usr/bin/env bash
+set -eu
+
+SERVICE="iqbus.service"
+STATE_FILE="/run/iqbus-udev-was-active"
+
+case "${1:-}" in
+  remove)
+    if systemctl is-active --quiet "$SERVICE"; then
+      : > "$STATE_FILE"
+      systemctl stop "$SERVICE"
+    else
+      rm -f "$STATE_FILE"
+    fi
+    ;;
+  add)
+    if [ -f "$STATE_FILE" ]; then
+      rm -f "$STATE_FILE"
+      systemctl restart "$SERVICE"
+    elif systemctl is-enabled --quiet "$SERVICE"; then
+      systemctl restart "$SERVICE"
+    fi
+    ;;
+esac
+"""
+
+
+def build_iqbus_udev_rules() -> str:
+    helper = str(IQBUS_UDEV_HELPER_PATH)
+    rule_lines = []
+    for usb_id in sorted(KNOWN_RTL_USB_IDS):
+        vendor_id, product_id = usb_id.split(":", 1)
+        rule_lines.append(
+            'ACTION=="remove", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", '
+            f'ATTR{{idVendor}}=="{vendor_id}", ATTR{{idProduct}}=="{product_id}", '
+            f'RUN+="{helper} remove"'
+        )
+        rule_lines.append(
+            'ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", '
+            f'ATTR{{idVendor}}=="{vendor_id}", ATTR{{idProduct}}=="{product_id}", '
+            f'RUN+="{helper} add"'
+        )
+    return "\n".join(rule_lines) + "\n"
+
+
+def read_text_if_exists(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+
+
+def write_iqbus_udev_helper(helper_text: str) -> None:
+    IQBUS_UDEV_HELPER_PATH.write_text(helper_text, encoding="utf-8")
+    os.chown(IQBUS_UDEV_HELPER_PATH, 0, 0)
+    os.chmod(IQBUS_UDEV_HELPER_PATH, 0o755)
+
+
+def write_iqbus_udev_rules(rules_text: str) -> None:
+    IQBUS_UDEV_RULES_PATH.write_text(rules_text, encoding="utf-8")
+    os.chown(IQBUS_UDEV_RULES_PATH, 0, 0)
+    os.chmod(IQBUS_UDEV_RULES_PATH, 0o644)
+
+
+def ensure_iqbus_udev_rules() -> bool:
+    expected_helper = build_iqbus_udev_helper()
+    expected_rules = build_iqbus_udev_rules()
+    helper_updated = read_text_if_exists(IQBUS_UDEV_HELPER_PATH) != expected_helper
+    rules_updated = read_text_if_exists(IQBUS_UDEV_RULES_PATH) != expected_rules
+
+    if helper_updated:
+        write_iqbus_udev_helper(expected_helper)
+    if rules_updated:
+        write_iqbus_udev_rules(expected_rules)
+    if helper_updated or rules_updated:
+        run_command(["udevadm", "control", "--reload-rules"])
+        run_command(["udevadm", "settle"], check=False)
+        return True
+    return False
+
+
 def write_iqbus_config(config_text: str) -> None:
     IQBUS_CONFIG_PATH.write_text(config_text, encoding="utf-8")
     iqbus_user = pwd.getpwnam(IQBUS_USER)
@@ -1284,6 +1369,9 @@ def stop_sdr_server() -> None:
 
 
 def server_settings_menu() -> None:
+    if ensure_iqbus_udev_rules():
+        print()
+        print("Installed or updated RTL-SDR udev rules for iqbus.")
     while True:
         config_text = read_iqbus_config()
         report_failed_iqbus_service()
@@ -1382,6 +1470,7 @@ def configure_server() -> None:
 
     write_iqbus_config(build_iqbus_config(selected_device))
     write_iqbus_service(build_iqbus_service())
+    ensure_iqbus_udev_rules()
     reload_and_enable_service()
 
     print()
