@@ -46,6 +46,7 @@ IQBUS_GROUP = "plugdev"
 STREAM_GROUP = "broadcasters"
 IQBUS_CONFIG_PATH = Path("/etc/iqbus.config")
 IQBUS_SERVICE_PATH = Path("/etc/systemd/system/iqbus.service")
+SDR_SERVER_SERVICE_PATH = Path("/usr/lib/systemd/system/sdr-server.service")
 IQBUS_UDEV_RULES_PATH = Path("/etc/udev/rules.d/99-iqbus-rtl-sdr.rules")
 IQBUS_UDEV_HELPER_PATH = Path("/usr/local/bin/iqbus-udev-handler.sh")
 IQBUS_UDEV_STATE_PATH = Path("/run/iqbus-udev-was-active")
@@ -841,6 +842,28 @@ def iqbus_starts_on_boot() -> bool:
     return result.stdout.strip() == "enabled"
 
 
+def warn_if_builtin_sdr_server_service_is_active() -> None:
+    if not SDR_SERVER_SERVICE_PATH.exists():
+        return
+
+    service_name = "sdr-server.service"
+    is_enabled = service_starts_on_boot(service_name)
+    is_running = service_is_running(service_name)
+    if not (is_enabled or is_running):
+        return
+
+    status_parts = []
+    if is_running:
+        status_parts.append("running")
+    if is_enabled:
+        status_parts.append("enabled")
+    status_text = " and ".join(status_parts)
+
+    print()
+    print(f"Warning: The distro-provided sdr-server.service is currently {status_text}.")
+    print("Consider disabling it so it does not conflict with iqbus.service.")
+
+
 def wait_for_iqbus_state(target_state: str, timeout_seconds: float = 10.0) -> str:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
@@ -1332,6 +1355,7 @@ def server_settings_menu() -> None:
     if ensure_iqbus_udev_rules():
         print()
         print("Installed or updated RTL-SDR udev rules for iqbus.")
+    warn_if_builtin_sdr_server_service_is_active()
     while True:
         config_text = read_iqbus_config()
         report_failed_iqbus_service()
