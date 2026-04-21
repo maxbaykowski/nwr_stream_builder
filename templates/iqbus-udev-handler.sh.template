@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -eu
+
+SERVICE="iqbus.service"
+STATE_FILE="/run/iqbus-udev-was-active"
+
+case "${1:-}" in
+  remove)
+    if systemctl is-active --quiet "$SERVICE"; then
+      : > "$STATE_FILE"
+      systemctl stop "$SERVICE"
+    else
+      rm -f "$STATE_FILE"
+    fi
+    ;;
+  add)
+    if [ -f "$STATE_FILE" ]; then
+      rm -f "$STATE_FILE"
+      systemctl restart "$SERVICE"
+    elif systemctl is-enabled --quiet "$SERVICE"; then
+      systemctl restart "$SERVICE"
+    fi
+    ;;
+esac
