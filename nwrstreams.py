@@ -32,6 +32,7 @@ DEPENDENCIES = {
     "sox": ("sox",),
     "ffmpeg": ("ffmpeg",),
     "liquidsoap": ("liquidsoap",),
+    "csdr": ("csdr",),
     "sdr_server": ("sdr_server",),
     "sdr_server_client": ("sdr_server_client",),
 }
