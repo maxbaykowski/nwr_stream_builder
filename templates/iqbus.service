@@ -4,9 +4,9 @@ After=network.target
 Wants=network.target
 
 [Service]
-user=iqbus
+User=iqbus
 Type=simple
-ExecStart= sdr_server /etc/iqbus.config
+ExecStart=sdr_server /etc/iqbus.config
 Restart=always
 KillMode=control-group
 RestartSec=1

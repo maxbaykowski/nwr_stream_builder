@@ -3,7 +3,6 @@ Description=<CALLSIGN> NOAA Weather Radio stream
 After=network-online.target
 After=iqbus.service
 Wants=network-online.target
-Requires=iqbus.service
 [Service]
 Type=simple
 User=<CALLSIGN_LOWER>

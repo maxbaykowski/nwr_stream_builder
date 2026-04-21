@@ -749,56 +749,15 @@ def build_iqbus_config(device: RtlDevice) -> str:
 
 
 def build_iqbus_service() -> str:
-    service_text = load_template("iqbus.service")
-    service_text = service_text.replace("user=", "User=")
-    service_text = service_text.replace("ExecStart= sdr_server", "ExecStart=sdr_server")
-    return service_text
+    return load_template("iqbus.service")
 
 
 def build_iqbus_udev_helper() -> str:
-    return """#!/usr/bin/env bash
-set -eu
-
-SERVICE="iqbus.service"
-STATE_FILE="/run/iqbus-udev-was-active"
-
-case "${1:-}" in
-  remove)
-    if systemctl is-active --quiet "$SERVICE"; then
-      : > "$STATE_FILE"
-      systemctl stop "$SERVICE"
-    else
-      rm -f "$STATE_FILE"
-    fi
-    ;;
-  add)
-    if [ -f "$STATE_FILE" ]; then
-      rm -f "$STATE_FILE"
-      systemctl restart "$SERVICE"
-    elif systemctl is-enabled --quiet "$SERVICE"; then
-      systemctl restart "$SERVICE"
-    fi
-    ;;
-esac
-"""
+    return load_template("iqbus-udev-handler.sh.template")
 
 
 def build_iqbus_udev_rules() -> str:
-    helper = str(IQBUS_UDEV_HELPER_PATH)
-    rule_lines = []
-    for usb_id in sorted(KNOWN_RTL_USB_IDS):
-        vendor_id, product_id = usb_id.split(":", 1)
-        rule_lines.append(
-            'ACTION=="remove", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", '
-            f'ATTR{{idVendor}}=="{vendor_id}", ATTR{{idProduct}}=="{product_id}", '
-            f'RUN+="{helper} remove"'
-        )
-        rule_lines.append(
-            'ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", '
-            f'ATTR{{idVendor}}=="{vendor_id}", ATTR{{idProduct}}=="{product_id}", '
-            f'RUN+="{helper} add"'
-        )
-    return "\n".join(rule_lines) + "\n"
+    return load_template("iqbus-udev.rules.template")
 
 
 def read_text_if_exists(path: Path) -> str | None:
