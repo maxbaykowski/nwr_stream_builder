@@ -2161,6 +2161,7 @@ def ensure_stream_liquidsoap_controls(callsign_lower: str) -> bool:
         and 'fallback_delay = interactive.float(' in config_text
         and 'radio = mksafe(radio)' in config_text
         and 'blank.strip(max_blank=fallback_delay, track_sensitive=false, radio)' in config_text
+        and '| csdr dcblock |' in config_text
     ):
         return False
 

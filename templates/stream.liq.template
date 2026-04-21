@@ -49,7 +49,7 @@ radio = input.external.rawaudio(
   max=10.0,
   restart=true,
   restart_on_error=true,
-  "sdr_server_client -k #{server} -p #{port} -s #{samplerate} -b 162475000 -f #{freq} - | csdr fmdemod | csdr deemphasis --wfm 16000 530e-6 | csdr convert -ifloat -os16"
+  "sdr_server_client -k #{server} -p #{port} -s #{samplerate} -b 162475000 -f #{freq} - | csdr fmdemod | csdr deemphasis --wfm 16000 530e-6 | csdr dcblock | csdr convert -ifloat -os16"
   )
 emergency = single("/usr/local/share/nwr/fallback.wav")
 radio = filter(freq=audio_low_pass, mode="low", q=1.0, radio)
