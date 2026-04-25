@@ -82,6 +82,10 @@ DEFAULT_AUDIO_VOLUME = 1.0
 DEFAULT_AUDIO_LOW_PASS = 3000.0
 DEFAULT_AUDIO_HIGH_PASS = 0.0
 DEFAULT_FALLBACK_DELAY = 30.0
+EAS_BLOCK_START_MARKER = "# EAS logging start"
+EAS_BLOCK_END_MARKER = "# EAS logging end"
+LEGACY_EAS_COMMENT = "# This is only for EAS logging (if desired)"
+EAS_OPTIONAL_DEPENDENCIES = ("ffmpeg", "sox", "multimon-ng")
 
 
 @dataclass
@@ -127,6 +131,18 @@ def missing_dependencies() -> list[str]:
         if not any(shutil.which(command) for command in commands):
             missing.append(package_name)
     return missing
+
+
+def eas_optional_dependencies_available() -> bool:
+    return all(shutil.which(command) for command in EAS_OPTIONAL_DEPENDENCIES)
+
+
+def eas_recorder_in_path() -> bool:
+    return shutil.which("easrecorder.py") is not None
+
+
+def eas_recording_available() -> bool:
+    return eas_optional_dependencies_available() and eas_recorder_in_path()
 
 
 def run_command(command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -1808,9 +1824,6 @@ def ensure_shared_stream_assets() -> None:
     FALLBACK_TARGET_DIR.mkdir(parents=True, exist_ok=True)
     if not FALLBACK_TARGET_PATH.exists():
         shutil.copy2(FALLBACK_SOURCE_PATH, FALLBACK_TARGET_PATH)
-    eas_target_parent = EAS_SCRIPT_TARGET_PATH.parent
-    eas_target_parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(EAS_SCRIPT_SOURCE_PATH, EAS_SCRIPT_TARGET_PATH)
 
     ensure_group_exists(STREAM_GROUP)
     stream_group = grp.getgrnam(STREAM_GROUP)
@@ -1818,8 +1831,13 @@ def ensure_shared_stream_assets() -> None:
     os.chmod(FALLBACK_TARGET_DIR, 0o750)
     os.chown(FALLBACK_TARGET_PATH, 0, stream_group.gr_gid)
     os.chmod(FALLBACK_TARGET_PATH, 0o640)
-    os.chown(EAS_SCRIPT_TARGET_PATH, 0, 0)
-    os.chmod(EAS_SCRIPT_TARGET_PATH, 0o755)
+
+    if eas_optional_dependencies_available():
+        eas_target_parent = EAS_SCRIPT_TARGET_PATH.parent
+        eas_target_parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(EAS_SCRIPT_SOURCE_PATH, EAS_SCRIPT_TARGET_PATH)
+        os.chown(EAS_SCRIPT_TARGET_PATH, 0, 0)
+        os.chmod(EAS_SCRIPT_TARGET_PATH, 0o755)
 
 
 def build_output_block(output: IcecastOutput) -> str:
@@ -1850,6 +1868,23 @@ def build_output_block(output: IcecastOutput) -> str:
         ]
     )
     return "\n".join(block_lines)
+
+
+def build_eas_logging_block(callsign_lower: str) -> str:
+    eas_recordings_path = escape_liquidsoap_string(str(stream_eas_recordings_dir(callsign_lower)))
+    return "\n".join(
+        [
+            "# This is only for EAS logging (if desired)",
+            EAS_BLOCK_START_MARKER,
+            'rawaudio = %wav(header=false, stereo=false, samplesize=16, samplerate=16000)',
+            "#EAS logging output",
+            "output.external(",
+            "  rawaudio,",
+            f'  "python3 /usr/local/bin/easrecorder.py --rate 16000 --max-seconds 300 --pre-seconds 10 --post-seconds 10 --outdir {eas_recordings_path} --mp3 --local-time",',
+            "  radio)",
+            EAS_BLOCK_END_MARKER,
+        ]
+    )
 
 
 def find_matching_parenthesis(text: str, open_index: int) -> int:
@@ -1919,6 +1954,52 @@ def extract_liquidsoap_icecast_outputs(config_text: str) -> list[ParsedIcecastOu
             outputs.append(ParsedIcecastOutput(output=output, start=start, end=end + 1))
 
         search_from = end + 1
+
+
+def eas_logging_enabled_in_config(config_text: str) -> bool:
+    return (
+        (EAS_BLOCK_START_MARKER in config_text and EAS_BLOCK_END_MARKER in config_text)
+        or "/usr/local/bin/easrecorder.py" in config_text
+    )
+
+
+def toggle_eas_logging_block(config_text: str, callsign_lower: str, enabled: bool) -> str:
+    updated = config_text
+    start = updated.find(EAS_BLOCK_START_MARKER)
+    end = updated.find(EAS_BLOCK_END_MARKER)
+    if start != -1 and end != -1 and end >= start:
+        block_start = updated.rfind(LEGACY_EAS_COMMENT, 0, start)
+        if block_start == -1:
+            block_start = start
+        block_end = updated.find("\n", end)
+        if block_end == -1:
+            block_end = len(updated)
+        updated = updated[:block_start].rstrip() + "\n\n" + updated[block_end:].lstrip("\n")
+    else:
+        legacy_match = re.search(
+            r"\n?# This is only for EAS logging \(if desired\)\n"
+            r'rawaudio = %wav\(header=false, stereo=false, samplesize=16, samplerate=16000\)\n'
+            r"#EAS logging output\n"
+            r"output\.external\(\n"
+            r"  rawaudio,\n"
+            r'  "python3 /usr/local/bin/easrecorder\.py[^"\n]*",\n'
+            r"  radio\)\n?",
+            updated,
+        )
+        if legacy_match:
+            updated = updated[: legacy_match.start()].rstrip() + "\n\n" + updated[legacy_match.end() :].lstrip("\n")
+
+    if not enabled:
+        return updated.rstrip() + "\n"
+
+    eas_block = build_eas_logging_block(callsign_lower)
+    icecast_start = updated.find("output.icecast(")
+    if icecast_start == -1:
+        raise SetupError(f"Could not find output.icecast block in {callsign_lower}.liq.")
+
+    prefix = updated[:icecast_start].rstrip()
+    suffix = updated[icecast_start:].lstrip("\n")
+    return f"{prefix}\n\n{eas_block}\n\n{suffix.rstrip()}\n"
 
 
 def read_stream_config(callsign_lower: str) -> str:
@@ -2138,6 +2219,7 @@ def extract_stream_metadata_from_config(callsign_lower: str, config_text: str) -
 
 def ensure_stream_liquidsoap_controls(callsign_lower: str) -> bool:
     config_text = read_stream_config(callsign_lower)
+    eas_enabled = eas_logging_enabled_in_config(config_text) and eas_recording_available()
     if (
         'settings.server.socket := true' in config_text
         and 'interactive.persistent(variables_path)' in config_text
@@ -2154,7 +2236,7 @@ def ensure_stream_liquidsoap_controls(callsign_lower: str) -> bool:
         raise SetupError(f"Could not upgrade {callsign_lower}.liq because no Icecast outputs were found.")
 
     metadata = extract_stream_metadata_from_config(callsign_lower, config_text)
-    rebuilt_config = build_stream_liquidsoap(metadata, outputs[0].output)
+    rebuilt_config = build_stream_liquidsoap(metadata, outputs[0].output, eas_recording_enabled=eas_enabled)
     for parsed_output in outputs[1:]:
         rebuilt_config = rebuilt_config.rstrip() + "\n\n" + build_output_block(parsed_output.output) + "\n"
     write_stream_config(callsign_lower, rebuilt_config)
@@ -2192,7 +2274,9 @@ def set_stream_audio_setting(callsign_lower: str, key: str, value: float) -> Non
             print(f"Saved the setting, but could not apply it live: {error}")
 
 
-def build_stream_liquidsoap(station: dict[str, str], output: IcecastOutput) -> str:
+def build_stream_liquidsoap(
+    station: dict[str, str], output: IcecastOutput, eas_recording_enabled: bool = True
+) -> str:
     iqbus_host, iqbus_port = read_iqbus_stream_settings()
     template = load_template("stream.liq.template")
     output_block = build_output_block(output)
@@ -2217,6 +2301,7 @@ def build_stream_liquidsoap(station: dict[str, str], output: IcecastOutput) -> s
         raise SetupError("Stream Liquidsoap template is missing an output.icecast block.")
     end = find_matching_parenthesis(template, template.find("(", start))
     template = template[:start] + output_block + template[end + 1 :]
+    template = toggle_eas_logging_block(template, callsign_lower, eas_recording_enabled)
     return template
 
 
@@ -2290,7 +2375,11 @@ def create_stream() -> None:
     ensure_stream_user(callsign_lower)
     ensure_shared_stream_assets()
     ensure_stream_state_layout(callsign_lower)
-    liquidsoap_text = build_stream_liquidsoap(station, output)
+    liquidsoap_text = build_stream_liquidsoap(
+        station,
+        output,
+        eas_recording_enabled=eas_recording_available(),
+    )
     service_text = build_stream_service(callsign_lower)
     write_stream_files(callsign_lower, liquidsoap_text, service_text)
     enable_stream_service(callsign_lower)
@@ -2405,6 +2494,47 @@ def audio_settings_menu(callsign_lower: str) -> None:
             value = prompt_fallback_delay(settings["fallback_delay"])
             set_stream_audio_setting(callsign_lower, "fallback_delay", value)
             print(f"Fallback delay set to {int(value)} seconds.")
+
+
+def set_stream_eas_recording_enabled(callsign_lower: str, enabled: bool) -> None:
+    if enabled and not eas_recording_available():
+        raise SetupError(
+            "EAS recording is unavailable. easrecorder.py must be in PATH and ffmpeg, sox, and multimon-ng must be installed."
+        )
+
+    config_text = read_stream_config(callsign_lower)
+    currently_enabled = eas_logging_enabled_in_config(config_text)
+    if currently_enabled == enabled:
+        state = "enabled" if enabled else "disabled"
+        print()
+        print(f"EAS recording is already {state}.")
+        return
+
+    updated_config = toggle_eas_logging_block(config_text, callsign_lower, enabled)
+    write_stream_config(callsign_lower, updated_config)
+    restart_stream_service(callsign_lower)
+    state = "enabled" if enabled else "disabled"
+    print()
+    print(f"EAS recording {state} and stream restarted.")
+
+
+def eas_recording_settings_menu(callsign_lower: str) -> None:
+    while True:
+        enabled = eas_logging_enabled_in_config(read_stream_config(callsign_lower))
+        selection = prompt_menu_with_back(
+            "EAS recording settings",
+            [
+                f"Recording: {'enabled' if enabled else 'disabled'}",
+                "Disable recording" if enabled else "Enable recording",
+            ],
+            "Back to stream menu",
+        )
+        if selection == -1:
+            return
+        if selection == 0:
+            continue
+        if selection == 1:
+            set_stream_eas_recording_enabled(callsign_lower, not enabled)
 
 
 def edit_output_menu(
@@ -2548,6 +2678,8 @@ def stream_menu(callsign: str) -> None:
             f"Start Stream On Host Boot: {'on' if start_on_boot else 'off'}",
             "Delete Stream",
         ]
+        if eas_recording_available():
+            options.insert(2, "EAS recording settings")
         selection = prompt_menu_with_back("Manage Stream", options, "Back to streams")
         if selection == -1:
             return
@@ -2555,14 +2687,16 @@ def stream_menu(callsign: str) -> None:
             outputs_menu(callsign_lower, station)
         elif selection == 1:
             audio_settings_menu(callsign_lower)
-        elif selection == 2:
+        elif eas_recording_available() and selection == 2:
+            eas_recording_settings_menu(callsign_lower)
+        elif selection == (3 if eas_recording_available() else 2):
             if stream_running:
                 stop_stream_service(callsign_lower)
             else:
                 start_stream_service(callsign_lower)
-        elif selection == 3:
+        elif selection == (4 if eas_recording_available() else 3):
             toggle_stream_start_on_boot(callsign_lower)
-        elif selection == 4:
+        elif selection == (5 if eas_recording_available() else 4):
             delete_stream(callsign_lower)
             return
 

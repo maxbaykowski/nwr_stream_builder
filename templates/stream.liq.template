@@ -61,12 +61,14 @@ radio = fallback(track_sensitive=false, [radio, emergency])
 encoder = %mp3(bitrate=64, stereo=false, samplerate=16000)
 
 # This is only for EAS logging (if desired)
+# EAS logging start
 rawaudio = %wav(header=false, stereo=false, samplesize=16, samplerate=16000)
 #EAS logging output
 output.external(
   rawaudio,
   "python3 /usr/local/bin/easrecorder.py --rate 16000 --max-seconds 300 --pre-seconds 10 --post-seconds 10 --outdir <EAS_RECORDINGS_PATH> --mp3 --local-time",
   radio)
+# EAS logging end
 
 #Ice Cast output
 output.icecast(
