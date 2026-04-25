@@ -2656,7 +2656,6 @@ def eas_recording_settings_menu(callsign_lower: str) -> None:
         selection = prompt_menu_with_back(
             "EAS recording settings",
             [
-                f"Recording: {'enabled' if enabled else 'disabled'}",
                 f"EAS pre seconds: {int(settings['eas_pre_seconds'])}",
                 f"EAS post seconds: {int(settings['eas_post_seconds'])}",
                 f"EAS max seconds: {int(settings['eas_max_seconds'])}",
@@ -2668,22 +2667,20 @@ def eas_recording_settings_menu(callsign_lower: str) -> None:
         if selection == -1:
             return
         if selection == 0:
-            continue
-        if selection == 1:
             value = prompt_eas_buffer_seconds("EAS pre seconds", int(settings["eas_pre_seconds"]))
             set_stream_eas_timing_setting(callsign_lower, "eas_pre_seconds", value)
             print(f"EAS pre seconds set to {value} and stream restarted.")
-        elif selection == 2:
+        elif selection == 1:
             value = prompt_eas_buffer_seconds("EAS post seconds", int(settings["eas_post_seconds"]))
             set_stream_eas_timing_setting(callsign_lower, "eas_post_seconds", value)
             print(f"EAS post seconds set to {value} and stream restarted.")
-        elif selection == 3:
+        elif selection == 2:
             value = prompt_eas_max_seconds(int(settings["eas_max_seconds"]))
             set_stream_eas_timing_setting(callsign_lower, "eas_max_seconds", value)
             print(f"EAS max seconds set to {value} and stream restarted.")
-        elif selection == 4:
+        elif selection == 3:
             export_stream_eas_recordings(callsign_lower)
-        elif selection == 5:
+        elif selection == 4:
             set_stream_eas_recording_enabled(callsign_lower, not enabled)
 
 
