@@ -2092,6 +2092,23 @@ def stream_eas_recordings_dir(callsign_lower: str) -> Path:
     return stream_state_dir(callsign_lower) / "eas_recordings"
 
 
+def export_owner_for_current_session() -> tuple[str, Path, int, int]:
+    sudo_user = os.environ.get("SUDO_USER", "").strip()
+    if sudo_user:
+        try:
+            user_info = pwd.getpwnam(sudo_user)
+            return (sudo_user, Path(user_info.pw_dir), user_info.pw_uid, user_info.pw_gid)
+        except KeyError:
+            pass
+
+    try:
+        root_info = pwd.getpwnam("root")
+        root_home = Path(root_info.pw_dir or "/root")
+        return ("root", root_home, root_info.pw_uid, root_info.pw_gid)
+    except KeyError:
+        return ("root", Path("/root"), 0, 0)
+
+
 def default_stream_settings() -> dict[str, float | int]:
     return {
         "audio_volume": DEFAULT_AUDIO_VOLUME,
@@ -2580,6 +2597,58 @@ def set_stream_eas_recording_enabled(callsign_lower: str, enabled: bool) -> None
     print(f"EAS recording {state} and stream restarted.")
 
 
+def export_stream_eas_recordings(callsign_lower: str) -> None:
+    source_dir = stream_eas_recordings_dir(callsign_lower)
+    if not source_dir.exists():
+        print()
+        print("No EAS recordings directory exists for this stream.")
+        return
+
+    recordings = sorted(path for path in source_dir.iterdir() if path.is_file())
+    if not recordings:
+        print()
+        print("No EAS recordings were found for this stream.")
+        return
+
+    owner_name, owner_home, owner_uid, owner_gid = export_owner_for_current_session()
+    default_destination = owner_home / "eas_recordings" / callsign_lower
+    destination_input = prompt_text("Export directory: ", str(default_destination)).strip()
+    destination = Path(destination_input or str(default_destination)).expanduser()
+
+    if destination.exists() and not destination.is_dir():
+        raise SetupError(f"Export destination is not a directory: {destination}")
+
+    missing_directories: list[Path] = []
+    current = destination
+    while not current.exists():
+        missing_directories.append(current)
+        if current.parent == current:
+            break
+        current = current.parent
+
+    destination.mkdir(parents=True, exist_ok=True)
+    for directory in reversed(missing_directories):
+        os.chown(directory, owner_uid, owner_gid)
+    os.chown(destination, owner_uid, owner_gid)
+
+    copied = 0
+    skipped = 0
+    for source_path in recordings:
+        destination_path = destination / source_path.name
+        if destination_path.exists():
+            skipped += 1
+            continue
+        shutil.copy2(source_path, destination_path)
+        os.chown(destination_path, owner_uid, owner_gid)
+        copied += 1
+
+    print()
+    print(
+        f"Exported {copied} EAS recording{'s' if copied != 1 else ''} to {destination} "
+        f"as {owner_name}. Skipped {skipped} existing file{'s' if skipped != 1 else ''}."
+    )
+
+
 def eas_recording_settings_menu(callsign_lower: str) -> None:
     while True:
         enabled = eas_logging_enabled_in_config(read_stream_config(callsign_lower))
@@ -2591,6 +2660,7 @@ def eas_recording_settings_menu(callsign_lower: str) -> None:
                 f"EAS pre seconds: {int(settings['eas_pre_seconds'])}",
                 f"EAS post seconds: {int(settings['eas_post_seconds'])}",
                 f"EAS max seconds: {int(settings['eas_max_seconds'])}",
+                "Export EAS alerts",
                 "Disable recording" if enabled else "Enable recording",
             ],
             "Back to stream menu",
@@ -2612,6 +2682,8 @@ def eas_recording_settings_menu(callsign_lower: str) -> None:
             set_stream_eas_timing_setting(callsign_lower, "eas_max_seconds", value)
             print(f"EAS max seconds set to {value} and stream restarted.")
         elif selection == 4:
+            export_stream_eas_recordings(callsign_lower)
+        elif selection == 5:
             set_stream_eas_recording_enabled(callsign_lower, not enabled)
 
 
