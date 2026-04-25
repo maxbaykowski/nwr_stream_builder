@@ -82,6 +82,9 @@ DEFAULT_AUDIO_VOLUME = 1.0
 DEFAULT_AUDIO_LOW_PASS = 3000.0
 DEFAULT_AUDIO_HIGH_PASS = 0.0
 DEFAULT_FALLBACK_DELAY = 30.0
+DEFAULT_EAS_PRE_SECONDS = 10
+DEFAULT_EAS_POST_SECONDS = 10
+DEFAULT_EAS_MAX_SECONDS = 300
 EAS_BLOCK_START_MARKER = "# EAS logging start"
 EAS_BLOCK_END_MARKER = "# EAS logging end"
 LEGACY_EAS_COMMENT = "# This is only for EAS logging (if desired)"
@@ -1880,7 +1883,7 @@ def build_eas_logging_block(callsign_lower: str) -> str:
             "#EAS logging output",
             "output.external(",
             "  rawaudio,",
-            f'  "python3 /usr/local/bin/easrecorder.py --rate 16000 --max-seconds 300 --pre-seconds 10 --post-seconds 10 --outdir {eas_recordings_path} --mp3 --local-time",',
+            f'  "python3 /usr/local/bin/easrecorder.py --rate 16000 --max-seconds #{{eas_max_seconds}} --pre-seconds #{{eas_pre_seconds}} --post-seconds #{{eas_post_seconds}} --outdir {eas_recordings_path} --mp3 --local-time",',
             "  radio)",
             EAS_BLOCK_END_MARKER,
         ]
@@ -2089,17 +2092,20 @@ def stream_eas_recordings_dir(callsign_lower: str) -> Path:
     return stream_state_dir(callsign_lower) / "eas_recordings"
 
 
-def default_stream_audio_settings() -> dict[str, float]:
+def default_stream_settings() -> dict[str, float | int]:
     return {
         "audio_volume": DEFAULT_AUDIO_VOLUME,
         "audio_low_pass": DEFAULT_AUDIO_LOW_PASS,
         "audio_high_pass": DEFAULT_AUDIO_HIGH_PASS,
         "fallback_delay": DEFAULT_FALLBACK_DELAY,
+        "eas_pre_seconds": DEFAULT_EAS_PRE_SECONDS,
+        "eas_post_seconds": DEFAULT_EAS_POST_SECONDS,
+        "eas_max_seconds": DEFAULT_EAS_MAX_SECONDS,
     }
 
 
-def normalize_stream_audio_settings(values: dict[str, object] | None = None) -> dict[str, float]:
-    settings = default_stream_audio_settings()
+def normalize_stream_settings(values: dict[str, object] | None = None) -> dict[str, float | int]:
+    settings = default_stream_settings()
     if values is None:
         return settings
 
@@ -2108,28 +2114,38 @@ def normalize_stream_audio_settings(values: dict[str, object] | None = None) -> 
         if raw_value is None:
             continue
         try:
-            settings[key] = float(raw_value)
+            if isinstance(default_value, int):
+                settings[key] = int(float(raw_value))
+            else:
+                settings[key] = float(raw_value)
         except (TypeError, ValueError):
             settings[key] = default_value
 
-    settings["audio_volume"] = max(0.0, min(2.0, settings["audio_volume"]))
-    settings["audio_low_pass"] = max(1000.0, min(4000.0, settings["audio_low_pass"]))
-    settings["audio_high_pass"] = max(0.0, min(200.0, settings["audio_high_pass"]))
-    settings["fallback_delay"] = max(30.0, min(120.0, settings["fallback_delay"]))
+    settings["audio_volume"] = max(0.0, min(2.0, float(settings["audio_volume"])))
+    settings["audio_low_pass"] = max(1000.0, min(4000.0, float(settings["audio_low_pass"])))
+    settings["audio_high_pass"] = max(0.0, min(200.0, float(settings["audio_high_pass"])))
+    settings["fallback_delay"] = max(30.0, min(120.0, float(settings["fallback_delay"])))
+    settings["eas_pre_seconds"] = max(0, min(10, int(settings["eas_pre_seconds"])))
+    settings["eas_post_seconds"] = max(0, min(10, int(settings["eas_post_seconds"])))
+    settings["eas_max_seconds"] = max(1, min(600, int(settings["eas_max_seconds"])))
     return settings
 
 
-def liquidsoap_persistent_variables_payload(settings: dict[str, float]) -> dict[str, object]:
-    normalized = normalize_stream_audio_settings(settings)
+def liquidsoap_persistent_variables_payload(settings: dict[str, float | int]) -> dict[str, object]:
+    normalized = normalize_stream_settings(settings)
     return {
         "bool": [],
         "float": [
-            ["audio_volume", normalized["audio_volume"]],
-            ["audio_low_pass", normalized["audio_low_pass"]],
-            ["audio_high_pass", normalized["audio_high_pass"]],
-            ["fallback_delay", normalized["fallback_delay"]],
+            ["audio_volume", float(normalized["audio_volume"])],
+            ["audio_low_pass", float(normalized["audio_low_pass"])],
+            ["audio_high_pass", float(normalized["audio_high_pass"])],
+            ["fallback_delay", float(normalized["fallback_delay"])],
         ],
-        "int": [],
+        "int": [
+            ["eas_pre_seconds", int(normalized["eas_pre_seconds"])],
+            ["eas_post_seconds", int(normalized["eas_post_seconds"])],
+            ["eas_max_seconds", int(normalized["eas_max_seconds"])],
+        ],
         "string": [],
     }
 
@@ -2144,12 +2160,13 @@ def read_stream_audio_settings_payload(callsign_lower: str) -> object | None:
         return None
 
 
-def read_stream_audio_settings(callsign_lower: str) -> dict[str, float]:
+def read_stream_audio_settings(callsign_lower: str) -> dict[str, float | int]:
     payload = read_stream_audio_settings_payload(callsign_lower)
     if isinstance(payload, dict):
         float_values = payload.get("float")
+        int_values = payload.get("int")
+        extracted: dict[str, object] = {}
         if isinstance(float_values, list):
-            extracted: dict[str, object] = {}
             for item in float_values:
                 if (
                     isinstance(item, list)
@@ -2157,17 +2174,26 @@ def read_stream_audio_settings(callsign_lower: str) -> dict[str, float]:
                     and isinstance(item[0], str)
                 ):
                     extracted[item[0]] = item[1]
-            return normalize_stream_audio_settings(extracted)
+        if isinstance(int_values, list):
+            for item in int_values:
+                if (
+                    isinstance(item, list)
+                    and len(item) == 2
+                    and isinstance(item[0], str)
+                ):
+                    extracted[item[0]] = item[1]
+        if extracted:
+            return normalize_stream_settings(extracted)
     if isinstance(payload, list) and payload and isinstance(payload[0], dict):
-        return normalize_stream_audio_settings(payload[0])
+        return normalize_stream_settings(payload[0])
     if isinstance(payload, dict):
-        return normalize_stream_audio_settings(payload)
-    return default_stream_audio_settings()
+        return normalize_stream_settings(payload)
+    return default_stream_settings()
 
 
-def write_stream_audio_settings(callsign_lower: str, settings: dict[str, float]) -> None:
+def write_stream_audio_settings(callsign_lower: str, settings: dict[str, float | int]) -> None:
     path = stream_variables_path(callsign_lower)
-    normalized = normalize_stream_audio_settings(settings)
+    normalized = normalize_stream_settings(settings)
     payload_to_write = liquidsoap_persistent_variables_payload(normalized)
     path.write_text(json.dumps(payload_to_write, indent=2) + "\n", encoding="utf-8")
 
@@ -2225,6 +2251,9 @@ def ensure_stream_liquidsoap_controls(callsign_lower: str) -> bool:
         and 'interactive.persistent(variables_path)' in config_text
         and 'audio_volume = interactive.float(' in config_text
         and 'fallback_delay = interactive.float(' in config_text
+        and 'eas_pre_seconds = interactive.int(' in config_text
+        and 'eas_post_seconds = interactive.int(' in config_text
+        and 'eas_max_seconds = interactive.int(' in config_text
         and 'radio = mksafe(radio)' in config_text
         and 'blank.strip(max_blank=fallback_delay, track_sensitive=false, radio)' in config_text
         and '| csdr dcblock |' in config_text
@@ -2272,6 +2301,13 @@ def set_stream_audio_setting(callsign_lower: str, key: str, value: float) -> Non
             send_liquidsoap_socket_command(callsign_lower, f"var.set {key} = {format_audio_float(value)}")
         except SetupError as error:
             print(f"Saved the setting, but could not apply it live: {error}")
+
+
+def set_stream_eas_timing_setting(callsign_lower: str, key: str, value: int) -> None:
+    settings = read_stream_audio_settings(callsign_lower)
+    settings[key] = value
+    write_stream_audio_settings(callsign_lower, settings)
+    restart_stream_service(callsign_lower)
 
 
 def build_stream_liquidsoap(
@@ -2462,6 +2498,32 @@ def prompt_fallback_delay(current_value: float) -> float:
         return float(parsed)
 
 
+def prompt_eas_buffer_seconds(label: str, current_value: int) -> int:
+    while True:
+        value = prompt_text(f"{label}: ", str(current_value)).strip()
+        if not value.isdigit():
+            print(f"Enter {label.lower()} as a whole number of seconds.")
+            continue
+        parsed = int(value)
+        if not 0 <= parsed <= 10:
+            print(f"{label} must be between 0 and 10 seconds.")
+            continue
+        return parsed
+
+
+def prompt_eas_max_seconds(current_value: int) -> int:
+    while True:
+        value = prompt_text("EAS max seconds: ", str(current_value)).strip()
+        if not value.isdigit():
+            print("Enter EAS max seconds as a whole number of seconds.")
+            continue
+        parsed = int(value)
+        if not 1 <= parsed <= 600:
+            print("EAS max seconds must be between 1 and 600 seconds.")
+            continue
+        return parsed
+
+
 def audio_settings_menu(callsign_lower: str) -> None:
     ensure_stream_state_layout(callsign_lower)
     while True:
@@ -2521,10 +2583,14 @@ def set_stream_eas_recording_enabled(callsign_lower: str, enabled: bool) -> None
 def eas_recording_settings_menu(callsign_lower: str) -> None:
     while True:
         enabled = eas_logging_enabled_in_config(read_stream_config(callsign_lower))
+        settings = read_stream_audio_settings(callsign_lower)
         selection = prompt_menu_with_back(
             "EAS recording settings",
             [
                 f"Recording: {'enabled' if enabled else 'disabled'}",
+                f"EAS pre seconds: {int(settings['eas_pre_seconds'])}",
+                f"EAS post seconds: {int(settings['eas_post_seconds'])}",
+                f"EAS max seconds: {int(settings['eas_max_seconds'])}",
                 "Disable recording" if enabled else "Enable recording",
             ],
             "Back to stream menu",
@@ -2534,6 +2600,18 @@ def eas_recording_settings_menu(callsign_lower: str) -> None:
         if selection == 0:
             continue
         if selection == 1:
+            value = prompt_eas_buffer_seconds("EAS pre seconds", int(settings["eas_pre_seconds"]))
+            set_stream_eas_timing_setting(callsign_lower, "eas_pre_seconds", value)
+            print(f"EAS pre seconds set to {value} and stream restarted.")
+        elif selection == 2:
+            value = prompt_eas_buffer_seconds("EAS post seconds", int(settings["eas_post_seconds"]))
+            set_stream_eas_timing_setting(callsign_lower, "eas_post_seconds", value)
+            print(f"EAS post seconds set to {value} and stream restarted.")
+        elif selection == 3:
+            value = prompt_eas_max_seconds(int(settings["eas_max_seconds"]))
+            set_stream_eas_timing_setting(callsign_lower, "eas_max_seconds", value)
+            print(f"EAS max seconds set to {value} and stream restarted.")
+        elif selection == 4:
             set_stream_eas_recording_enabled(callsign_lower, not enabled)
 
 

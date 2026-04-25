@@ -41,6 +41,27 @@ fallback_delay = interactive.float(
   max=120.,
   30.
 )
+eas_pre_seconds = interactive.int(
+  "eas_pre_seconds",
+  description="EAS pre seconds",
+  min=0,
+  max=10,
+  10
+)
+eas_post_seconds = interactive.int(
+  "eas_post_seconds",
+  description="EAS post seconds",
+  min=0,
+  max=10,
+  10
+)
+eas_max_seconds = interactive.int(
+  "eas_max_seconds",
+  description="EAS max seconds",
+  min=1,
+  max=600,
+  300
+)
 interactive.persistent(variables_path)
 radio = input.external.rawaudio(
   samplerate=16000,
@@ -66,7 +87,7 @@ rawaudio = %wav(header=false, stereo=false, samplesize=16, samplerate=16000)
 #EAS logging output
 output.external(
   rawaudio,
-  "python3 /usr/local/bin/easrecorder.py --rate 16000 --max-seconds 300 --pre-seconds 10 --post-seconds 10 --outdir <EAS_RECORDINGS_PATH> --mp3 --local-time",
+  "python3 /usr/local/bin/easrecorder.py --rate 16000 --max-seconds #{eas_max_seconds} --pre-seconds #{eas_pre_seconds} --post-seconds #{eas_post_seconds} --outdir <EAS_RECORDINGS_PATH> --mp3 --local-time",
   radio)
 # EAS logging end
 
