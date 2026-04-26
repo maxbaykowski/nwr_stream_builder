@@ -2260,21 +2260,37 @@ def extract_stream_metadata_from_config(callsign_lower: str, config_text: str) -
     }
 
 
+def has_legacy_eas_interactive_int_parameters(config_text: str) -> bool:
+    return any(
+        block in config_text
+        for block in (
+            'eas_pre_seconds = interactive.int(\n  "eas_pre_seconds",\n  description="EAS pre seconds",\n  min=',
+            'eas_post_seconds = interactive.int(\n  "eas_post_seconds",\n  description="EAS post seconds",\n  min=',
+            'eas_max_seconds = interactive.int(\n  "eas_max_seconds",\n  description="EAS max seconds",\n  min=',
+        )
+    )
+
+
 def ensure_stream_liquidsoap_controls(callsign_lower: str) -> bool:
     config_text = read_stream_config(callsign_lower)
     eas_enabled = eas_logging_enabled_in_config(config_text) and eas_recording_available()
-    if (
-        'settings.server.socket := true' in config_text
-        and 'interactive.persistent(variables_path)' in config_text
-        and 'audio_volume = interactive.float(' in config_text
-        and 'fallback_delay = interactive.float(' in config_text
-        and 'eas_pre_seconds = interactive.int(' in config_text
-        and 'eas_post_seconds = interactive.int(' in config_text
-        and 'eas_max_seconds = interactive.int(' in config_text
-        and 'radio = mksafe(radio)' in config_text
-        and 'blank.strip(max_blank=fallback_delay, track_sensitive=false, radio)' in config_text
-        and '| csdr dcblock |' in config_text
-    ):
+    if has_legacy_eas_interactive_int_parameters(config_text):
+        config_ready = False
+    else:
+        config_ready = (
+            'settings.server.socket := true' in config_text
+            and 'interactive.persistent(variables_path)' in config_text
+            and 'audio_volume = interactive.float(' in config_text
+            and 'fallback_delay = interactive.float(' in config_text
+            and 'eas_pre_seconds = interactive.int(' in config_text
+            and 'eas_post_seconds = interactive.int(' in config_text
+            and 'eas_max_seconds = interactive.int(' in config_text
+            and 'radio = mksafe(radio)' in config_text
+            and 'blank.strip(max_blank=fallback_delay, track_sensitive=false, radio)' in config_text
+            and '| csdr dcblock |' in config_text
+        )
+
+    if config_ready:
         return False
 
     outputs = extract_liquidsoap_icecast_outputs(config_text)

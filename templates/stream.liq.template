@@ -44,22 +44,16 @@ fallback_delay = interactive.float(
 eas_pre_seconds = interactive.int(
   "eas_pre_seconds",
   description="EAS pre seconds",
-  min=0,
-  max=10,
   10
 )
 eas_post_seconds = interactive.int(
   "eas_post_seconds",
   description="EAS post seconds",
-  min=0,
-  max=10,
   10
 )
 eas_max_seconds = interactive.int(
   "eas_max_seconds",
   description="EAS max seconds",
-  min=1,
-  max=600,
   300
 )
 interactive.persistent(variables_path)
