@@ -88,6 +88,8 @@ DEFAULT_EAS_MAX_SECONDS = 300
 EAS_BLOCK_START_MARKER = "# EAS logging start"
 EAS_BLOCK_END_MARKER = "# EAS logging end"
 LEGACY_EAS_COMMENT = "# This is only for EAS logging (if desired)"
+ALSA_BLOCK_START_MARKER = "# ALSA monitor start"
+ALSA_BLOCK_END_MARKER = "# ALSA monitor end"
 EAS_OPTIONAL_DEPENDENCIES = ("ffmpeg", "sox", "multimon-ng")
 
 
@@ -727,6 +729,14 @@ def ensure_group_exists(group_name: str) -> None:
         grp.getgrnam(group_name)
     except KeyError:
         run_command(["groupadd", "--system", group_name])
+
+
+def group_exists(group_name: str) -> bool:
+    try:
+        grp.getgrnam(group_name)
+        return True
+    except KeyError:
+        return False
 
 
 def ensure_user_exists(username: str) -> None:
@@ -1890,6 +1900,16 @@ def build_eas_logging_block(callsign_lower: str) -> str:
     )
 
 
+def build_alsa_output_block() -> str:
+    return "\n".join(
+        [
+            ALSA_BLOCK_START_MARKER,
+            "output.alsa(radio)",
+            ALSA_BLOCK_END_MARKER,
+        ]
+    )
+
+
 def find_matching_parenthesis(text: str, open_index: int) -> int:
     depth = 0
     in_string = False
@@ -1964,6 +1984,40 @@ def eas_logging_enabled_in_config(config_text: str) -> bool:
         (EAS_BLOCK_START_MARKER in config_text and EAS_BLOCK_END_MARKER in config_text)
         or "/usr/local/bin/easrecorder.py" in config_text
     )
+
+
+def alsa_output_enabled_in_config(config_text: str) -> bool:
+    return (
+        (ALSA_BLOCK_START_MARKER in config_text and ALSA_BLOCK_END_MARKER in config_text)
+        or "output.alsa(" in config_text
+    )
+
+
+def toggle_alsa_output_block(config_text: str, enabled: bool) -> str:
+    updated = config_text
+    start = updated.find(ALSA_BLOCK_START_MARKER)
+    end = updated.find(ALSA_BLOCK_END_MARKER)
+    if start != -1 and end != -1 and end >= start:
+        block_end = updated.find("\n", end)
+        if block_end == -1:
+            block_end = len(updated)
+        updated = updated[:start].rstrip() + "\n\n" + updated[block_end:].lstrip("\n")
+    else:
+        legacy_match = re.search(r"\n?output\.alsa\([^\n]*radio[^\n]*\)\n?", updated)
+        if legacy_match:
+            updated = updated[: legacy_match.start()].rstrip() + "\n\n" + updated[legacy_match.end() :].lstrip("\n")
+
+    if not enabled:
+        return updated.rstrip() + "\n"
+
+    alsa_block = build_alsa_output_block()
+    icecast_start = updated.find("output.icecast(")
+    if icecast_start == -1:
+        raise SetupError("Could not find output.icecast block in stream config.")
+
+    prefix = updated[:icecast_start].rstrip()
+    suffix = updated[icecast_start:].lstrip("\n")
+    return f"{prefix}\n\n{alsa_block}\n\n{suffix.rstrip()}\n"
 
 
 def toggle_eas_logging_block(config_text: str, callsign_lower: str, enabled: bool) -> str:
@@ -2062,6 +2116,21 @@ def read_iqbus_stream_settings() -> tuple[str, int]:
     if not port_value or not port_value.isdigit():
         raise SetupError("IQ bus config is missing a valid port.")
     return ("127.0.0.1", int(port_value))
+
+
+def default_alsa_device_available() -> bool:
+    if shutil.which("aplay") is None:
+        return False
+
+    hardware_result = run_command(["aplay", "-l"], check=False)
+    if hardware_result.returncode != 0:
+        return False
+
+    devices_result = run_command(["aplay", "-L"], check=False)
+    if devices_result.returncode != 0:
+        return False
+
+    return any(line.strip() == "default" for line in devices_result.stdout.splitlines())
 
 
 def frequency_mhz_to_hz(frequency: str) -> int:
@@ -2514,6 +2583,30 @@ def append_output_to_stream(callsign_lower: str, output: IcecastOutput) -> None:
     print("Output added.")
 
 
+def set_stream_alsa_output_enabled(callsign_lower: str, enabled: bool) -> None:
+    config_text = read_stream_config(callsign_lower)
+    currently_enabled = alsa_output_enabled_in_config(config_text)
+    if currently_enabled == enabled:
+        state = "enabled" if enabled else "disabled"
+        print()
+        print(f"Default sound card monitor is already {state}.")
+        return
+
+    if enabled:
+        if not group_exists("audio"):
+            raise SetupError("The audio group does not exist.")
+        if not default_alsa_device_available():
+            raise SetupError("There is no default ALSA device.")
+        ensure_user_in_group(callsign_lower, "audio")
+
+    updated_config = toggle_alsa_output_block(config_text, enabled)
+    write_stream_config(callsign_lower, updated_config)
+    restart_stream_service(callsign_lower)
+    state = "enabled" if enabled else "disabled"
+    print()
+    print(f"Default sound card monitor {state} and stream restarted.")
+
+
 def prompt_audio_volume(current_value: float) -> float:
     while True:
         value = prompt_text("Audio volume: ", format_audio_float(current_value)).strip()
@@ -2828,13 +2921,22 @@ def edit_output_menu(
 
 def outputs_menu(callsign_lower: str, station: dict[str, str] | None) -> None:
     while True:
+        config_text = read_stream_config(callsign_lower)
+        alsa_enabled = alsa_output_enabled_in_config(config_text)
         parsed_outputs = extract_liquidsoap_icecast_outputs(read_stream_config(callsign_lower))
         options = [output_menu_label(parsed.output) for parsed in parsed_outputs]
+        options.append(
+            "Disable default sound card monitor"
+            if alsa_enabled
+            else "Enable default sound card monitor"
+        )
         options.append("Add output")
         selection = prompt_menu_with_back("Outputs", options, "Back to stream menu")
         if selection == -1:
             return
-        if selection == len(options) - 1:
+        if selection == len(parsed_outputs):
+            set_stream_alsa_output_enabled(callsign_lower, not alsa_enabled)
+        elif selection == len(options) - 1:
             output = prompt_icecast_output(station)
             if output is not None:
                 append_output_to_stream(callsign_lower, output)
