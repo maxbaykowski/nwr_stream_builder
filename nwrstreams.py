@@ -2122,15 +2122,19 @@ def default_alsa_device_available() -> bool:
     if shutil.which("aplay") is None:
         return False
 
+    devices_result = run_command(["aplay", "-L"], check=False)
+    if devices_result.returncode == 0 and any(
+        line.strip() == "default" for line in devices_result.stdout.splitlines()
+    ):
+        return True
+
     hardware_result = run_command(["aplay", "-l"], check=False)
     if hardware_result.returncode != 0:
         return False
 
-    devices_result = run_command(["aplay", "-L"], check=False)
-    if devices_result.returncode != 0:
-        return False
-
-    return any(line.strip() == "default" for line in devices_result.stdout.splitlines())
+    return any(
+        re.match(r"^card\s+\d+:", line.strip()) for line in hardware_result.stdout.splitlines()
+    )
 
 
 def frequency_mhz_to_hz(frequency: str) -> int:
