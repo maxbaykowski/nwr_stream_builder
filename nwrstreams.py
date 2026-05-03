@@ -2595,9 +2595,9 @@ def set_stream_alsa_output_enabled(callsign_lower: str, enabled: bool) -> None:
     if enabled:
         if not group_exists("audio"):
             raise SetupError("The audio group does not exist.")
+        ensure_user_in_group(callsign_lower, "audio")
         if not default_alsa_device_available():
             raise SetupError("There is no default ALSA device.")
-        ensure_user_in_group(callsign_lower, "audio")
 
     updated_config = toggle_alsa_output_block(config_text, enabled)
     write_stream_config(callsign_lower, updated_config)
