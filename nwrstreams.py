@@ -827,6 +827,11 @@ def ensure_iqbus_udev_rules() -> bool:
     return False
 
 
+def reload_iqbus_udev_rules() -> None:
+    run_command(["udevadm", "control", "--reload-rules"])
+    run_command(["udevadm", "settle"], check=False)
+
+
 def write_iqbus_config(config_text: str) -> None:
     IQBUS_CONFIG_PATH.write_text(config_text, encoding="utf-8")
     iqbus_user = pwd.getpwnam(IQBUS_USER)
@@ -1057,6 +1062,44 @@ def toggle_iqbus_start_on_boot() -> None:
     run_command(["systemctl", "enable", "iqbus.service"])
     print()
     print("Start server on host boot is now on.")
+
+
+def delete_iqbus_server_configuration() -> None:
+    response = input("Are you sure you want to stop using this machine as an SDR server? (y/n): ").strip().lower()
+    if response not in ("y", "yes"):
+        print("Server configuration was not removed.")
+        return
+
+    if iqbus_is_running():
+        stop_iqbus_service()
+
+    if iqbus_starts_on_boot():
+        run_command(["systemctl", "disable", "iqbus.service"], check=False)
+
+    if IQBUS_CONFIG_PATH.exists():
+        IQBUS_CONFIG_PATH.unlink()
+
+    if IQBUS_SERVICE_PATH.exists():
+        IQBUS_SERVICE_PATH.unlink()
+        run_command(["systemctl", "daemon-reload"])
+
+    udev_changed = False
+    if IQBUS_UDEV_RULES_PATH.exists():
+        IQBUS_UDEV_RULES_PATH.unlink()
+        udev_changed = True
+    if IQBUS_UDEV_HELPER_PATH.exists():
+        IQBUS_UDEV_HELPER_PATH.unlink()
+        udev_changed = True
+    if udev_changed:
+        reload_iqbus_udev_rules()
+
+    if IQBUS_UDEV_STATE_PATH.exists():
+        IQBUS_UDEV_STATE_PATH.unlink()
+
+    run_command(["userdel", "-r", IQBUS_USER], check=False)
+
+    print()
+    print("SDR server configuration removed.")
 
 
 def read_iqbus_config() -> str:
@@ -1423,6 +1466,7 @@ def server_settings_menu() -> None:
             f"Bias Tee: {'on' if bias_tee_enabled else 'off'} "
             "(supplies DC power for active antennas or LNAs)"
         )
+        options.append("Delete server configuration")
 
         selection = prompt_menu_with_back(
             "Server Configuration",
@@ -1461,6 +1505,13 @@ def server_settings_menu() -> None:
         elif selection == (8 if server_running else 7):
             if not agc_enabled:
                 toggle_bias_tee()
+            else:
+                delete_iqbus_server_configuration()
+                return
+        elif selection == (9 if server_running else 8):
+            if not agc_enabled:
+                delete_iqbus_server_configuration()
+                return
 
 
 def configure_server() -> None:
