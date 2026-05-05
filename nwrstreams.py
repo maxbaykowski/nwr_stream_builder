@@ -70,6 +70,7 @@ MAX_MANUAL_GAIN = 49.6
 MIN_PPM = -100
 MAX_PPM = 100
 IQBUS_FAILED_MESSAGE = "Error: SDR Server failed to start!"
+IQBUS_DEVICE_MISSING_MESSAGE = "The RTL SDR used for the server does not appear to be plugged in."
 PASSWORD_TOGGLE_CHAR = "\x13"
 GWES_SUBMISSION_URL = "https://forms.office.com/r/MLx6hKmnCe"
 WEATHER_USA_SUBMISSION_URL = "https://www.weatherusa.net/members/services/radio"
@@ -1109,6 +1110,21 @@ def read_iqbus_config() -> str:
         raise SetupError(f"Existing config not found: {IQBUS_CONFIG_PATH}") from error
 
 
+def configured_iqbus_device_is_present(config_text: str) -> bool:
+    configured_serial = (get_config_value(config_text, "device_serial") or "").strip().strip('"')
+    configured_index = get_config_value(config_text, "device_index")
+    devices = list_rtl_devices()
+
+    if configured_serial:
+        return any(device.serial == configured_serial for device in devices)
+
+    if configured_index is not None and configured_index.isdigit():
+        index = int(configured_index)
+        return any(device.index == index for device in devices)
+
+    return bool(devices)
+
+
 def get_config_value(config_text: str, key: str) -> str | None:
     match = re.search(rf"^{re.escape(key)}=(.+)$", config_text, re.MULTILINE)
     if match:
@@ -1416,6 +1432,11 @@ def restart_sdr_server() -> None:
 
 
 def start_sdr_server() -> None:
+    config_text = read_iqbus_config()
+    if not configured_iqbus_device_is_present(config_text):
+        print()
+        print(f"Error: {IQBUS_DEVICE_MISSING_MESSAGE}")
+        return
     start_iqbus_service()
 
 
@@ -1431,6 +1452,9 @@ def server_settings_menu() -> None:
     while True:
         config_text = read_iqbus_config()
         report_failed_iqbus_service()
+        if not configured_iqbus_device_is_present(config_text):
+            print()
+            print(f"Warning: {IQBUS_DEVICE_MISSING_MESSAGE}")
         server_running = iqbus_is_running()
         start_on_boot = iqbus_starts_on_boot()
         current_sample_rate = get_config_value(config_text, "band_sampling_rate") or "unknown"
