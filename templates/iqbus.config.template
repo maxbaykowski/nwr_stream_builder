@@ -8,15 +8,15 @@ port=8089
 # but server controls the sample rate of the band
 # each client's sample rate should be a fraction of
 # band_sampling_rate
-band_sampling_rate=2560000
+band_sampling_rate=1536000
 
 # controls the gain setting:
 #  0 - gain auto
 #  1 - gain manual, the gain setting should be specified
-gain_mode=1
+gain_mode=0
 
 # gain setting for manual gain mode
-gain=45.0
+gain=25.4
 
 # controls bias tee:
 #  0 - disabled
