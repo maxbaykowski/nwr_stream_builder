@@ -1125,6 +1125,29 @@ def configured_iqbus_device_is_present(config_text: str) -> bool:
     return bool(devices)
 
 
+def list_alternative_rtl_devices(config_text: str) -> tuple[list[RtlDevice], bool]:
+    devices = list_rtl_devices()
+    configured_serial = (get_config_value(config_text, "device_serial") or "").strip().strip('"')
+    configured_index = get_config_value(config_text, "device_index")
+    configured_index_value = int(configured_index) if configured_index and configured_index.isdigit() else None
+
+    if not devices:
+        return ([], False)
+
+    if configured_serial:
+        matching_serial_devices = [device for device in devices if device.serial == configured_serial]
+        if len(matching_serial_devices) > 1 and configured_index_value is not None:
+            alternatives = [device for device in devices if device.index != configured_index_value]
+        else:
+            alternatives = [device for device in devices if device.serial != configured_serial]
+    elif configured_index_value is not None:
+        alternatives = [device for device in devices if device.index != configured_index_value]
+    else:
+        alternatives = devices
+
+    return (alternatives, True)
+
+
 def get_config_value(config_text: str, key: str) -> str | None:
     match = re.search(rf"^{re.escape(key)}=(.+)$", config_text, re.MULTILINE)
     if match:
@@ -1224,6 +1247,35 @@ def toggle_hardware_agc() -> None:
 
     print()
     print(f"Hardware AGC is now {'on' if not agc_enabled else 'off'}.")
+
+
+def switch_iqbus_device() -> None:
+    config_text = read_iqbus_config()
+    devices, any_devices_connected = list_alternative_rtl_devices(config_text)
+    if not any_devices_connected:
+        print()
+        print("No RTL SDR dongles are connected.")
+        return
+    if not devices:
+        print()
+        print("No additional RTL SDR dongles are connected.")
+        return
+
+    selection = prompt_menu(
+        "Select the RTL-SDR device to use for the spectrum server",
+        [device.label() for device in devices],
+    )
+    selected_device = devices[selection]
+
+    updated_config = update_config_value(config_text, "device_index", str(selected_device.index))
+    if selected_device.serial:
+        updated_config = update_config_value(updated_config, "device_serial", f'"{selected_device.serial}"')
+    else:
+        updated_config = update_config_value(updated_config, "device_serial", '""')
+    write_config_and_restart(updated_config)
+
+    print()
+    print(f"SDR server now uses {selected_device.label()}.")
 
 
 def prompt_for_manual_gain(current_value: float | None) -> float:
@@ -1490,6 +1542,7 @@ def server_settings_menu() -> None:
             f"Bias Tee: {'on' if bias_tee_enabled else 'off'} "
             "(supplies DC power for active antennas or LNAs)"
         )
+        options.append("Switch SDR dongle")
         options.append("Delete server configuration")
 
         selection = prompt_menu_with_back(
@@ -1530,9 +1583,14 @@ def server_settings_menu() -> None:
             if not agc_enabled:
                 toggle_bias_tee()
             else:
+                switch_iqbus_device()
+        elif selection == (9 if server_running else 8):
+            if not agc_enabled:
+                switch_iqbus_device()
+            else:
                 delete_iqbus_server_configuration()
                 return
-        elif selection == (9 if server_running else 8):
+        elif selection == (10 if server_running else 9):
             if not agc_enabled:
                 delete_iqbus_server_configuration()
                 return
