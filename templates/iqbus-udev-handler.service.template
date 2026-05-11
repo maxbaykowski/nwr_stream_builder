@@ -1,0 +1,7 @@
+[Unit]
+Description=Handle iqbus RTL-SDR udev event
+After=systemd-udevd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/iqbus-udev-handler.sh

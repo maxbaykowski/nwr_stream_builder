@@ -49,6 +49,7 @@ IQBUS_SERVICE_PATH = Path("/etc/systemd/system/iqbus.service")
 SDR_SERVER_SERVICE_PATH = Path("/usr/lib/systemd/system/sdr-server.service")
 IQBUS_UDEV_RULES_PATH = Path("/etc/udev/rules.d/99-iqbus-rtl-sdr.rules")
 IQBUS_UDEV_HELPER_PATH = Path("/usr/local/bin/iqbus-udev-handler.sh")
+IQBUS_UDEV_TRIGGER_SERVICE_PATH = Path("/etc/systemd/system/iqbus-udev-handler.service")
 IQBUS_UDEV_LOCK_PATH = Path("/run/iqbus-udev.lock")
 STREAM_SERVICE_DIR = Path("/etc/systemd/system")
 LIQUIDSOAP_BIN_DIR = Path("/usr/local/bin")
@@ -788,6 +789,10 @@ def build_iqbus_udev_helper() -> str:
     return load_template("iqbus-udev-handler.sh.template")
 
 
+def build_iqbus_udev_trigger_service() -> str:
+    return load_template("iqbus-udev-handler.service.template")
+
+
 def build_iqbus_udev_rules() -> str:
     return load_template("iqbus-udev.rules.template")
 
@@ -805,6 +810,12 @@ def write_iqbus_udev_helper(helper_text: str) -> None:
     os.chmod(IQBUS_UDEV_HELPER_PATH, 0o755)
 
 
+def write_iqbus_udev_trigger_service(service_text: str) -> None:
+    IQBUS_UDEV_TRIGGER_SERVICE_PATH.write_text(service_text, encoding="utf-8")
+    os.chown(IQBUS_UDEV_TRIGGER_SERVICE_PATH, 0, 0)
+    os.chmod(IQBUS_UDEV_TRIGGER_SERVICE_PATH, 0o644)
+
+
 def write_iqbus_udev_rules(rules_text: str) -> None:
     IQBUS_UDEV_RULES_PATH.write_text(rules_text, encoding="utf-8")
     os.chown(IQBUS_UDEV_RULES_PATH, 0, 0)
@@ -813,17 +824,23 @@ def write_iqbus_udev_rules(rules_text: str) -> None:
 
 def ensure_iqbus_udev_rules() -> bool:
     expected_helper = build_iqbus_udev_helper()
+    expected_trigger_service = build_iqbus_udev_trigger_service()
     expected_rules = build_iqbus_udev_rules()
     helper_updated = read_text_if_exists(IQBUS_UDEV_HELPER_PATH) != expected_helper
+    trigger_service_updated = read_text_if_exists(IQBUS_UDEV_TRIGGER_SERVICE_PATH) != expected_trigger_service
     rules_updated = read_text_if_exists(IQBUS_UDEV_RULES_PATH) != expected_rules
 
     if helper_updated:
         write_iqbus_udev_helper(expected_helper)
+    if trigger_service_updated:
+        write_iqbus_udev_trigger_service(expected_trigger_service)
     if rules_updated:
         write_iqbus_udev_rules(expected_rules)
+    if trigger_service_updated:
+        run_command(["systemctl", "daemon-reload"])
     if helper_updated or rules_updated:
-        run_command(["udevadm", "control", "--reload-rules"])
-        run_command(["udevadm", "settle"], check=False)
+        reload_iqbus_udev_rules()
+    if helper_updated or trigger_service_updated or rules_updated:
         return True
     return False
 
@@ -1080,8 +1097,14 @@ def delete_iqbus_server_configuration() -> None:
     if IQBUS_CONFIG_PATH.exists():
         IQBUS_CONFIG_PATH.unlink()
 
+    systemd_changed = False
     if IQBUS_SERVICE_PATH.exists():
         IQBUS_SERVICE_PATH.unlink()
+        systemd_changed = True
+    if IQBUS_UDEV_TRIGGER_SERVICE_PATH.exists():
+        IQBUS_UDEV_TRIGGER_SERVICE_PATH.unlink()
+        systemd_changed = True
+    if systemd_changed:
         run_command(["systemctl", "daemon-reload"])
 
     udev_changed = False
