@@ -1,2 +1,4 @@
 ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0bda", ATTR{idProduct}=="2832", RUN+="/usr/local/bin/iqbus-udev-handler.sh"
 ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0bda", ATTR{idProduct}=="2838", RUN+="/usr/local/bin/iqbus-udev-handler.sh"
+ACTION=="unbind", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ENV{PRODUCT}=="bda/2832/*", RUN+="/usr/local/bin/iqbus-udev-handler.sh"
+ACTION=="unbind", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ENV{PRODUCT}=="bda/2838/*", RUN+="/usr/local/bin/iqbus-udev-handler.sh"
