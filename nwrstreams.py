@@ -49,7 +49,7 @@ IQBUS_SERVICE_PATH = Path("/etc/systemd/system/iqbus.service")
 SDR_SERVER_SERVICE_PATH = Path("/usr/lib/systemd/system/sdr-server.service")
 IQBUS_UDEV_RULES_PATH = Path("/etc/udev/rules.d/99-iqbus-rtl-sdr.rules")
 IQBUS_UDEV_HELPER_PATH = Path("/usr/local/bin/iqbus-udev-handler.sh")
-IQBUS_UDEV_STATE_PATH = Path("/run/iqbus-udev-was-active")
+IQBUS_UDEV_LOCK_PATH = Path("/run/iqbus-udev.lock")
 STREAM_SERVICE_DIR = Path("/etc/systemd/system")
 LIQUIDSOAP_BIN_DIR = Path("/usr/local/bin")
 FALLBACK_TARGET_DIR = Path("/usr/local/share/nwr")
@@ -1094,8 +1094,8 @@ def delete_iqbus_server_configuration() -> None:
     if udev_changed:
         reload_iqbus_udev_rules()
 
-    if IQBUS_UDEV_STATE_PATH.exists():
-        IQBUS_UDEV_STATE_PATH.unlink()
+    if IQBUS_UDEV_LOCK_PATH.exists():
+        IQBUS_UDEV_LOCK_PATH.unlink()
 
     run_command(["userdel", "-r", IQBUS_USER], check=False)
 
