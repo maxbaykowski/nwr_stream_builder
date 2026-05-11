@@ -2,13 +2,68 @@
 set -eu
 
 SERVICE="iqbus.service"
+CONFIG="/etc/iqbus.config"
 LOCK_FILE="/run/iqbus-udev.lock"
+RETRY_COUNT=20
+RETRY_DELAY=0.5
 
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
   exit 0
 fi
 
-if systemctl is-enabled --quiet "$SERVICE"; then
-  systemctl restart "$SERVICE"
+if ! systemctl is-enabled --quiet "$SERVICE"; then
+  exit 0
 fi
+
+if ! command -v lsusb >/dev/null 2>&1; then
+  exit 0
+fi
+
+configured_serial() {
+  if [ ! -f "$CONFIG" ]; then
+    return 0
+  fi
+
+  awk -F= '
+    $1 == "device_serial" {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+      gsub(/^"/, "", $2)
+      gsub(/"$/, "", $2)
+      print $2
+      exit
+    }
+  ' "$CONFIG"
+}
+
+rtl_present() {
+  local wanted_serial
+  wanted_serial="$(configured_serial)"
+
+  if [ -z "$wanted_serial" ]; then
+    lsusb -d 0bda:2832 >/dev/null 2>&1 || lsusb -d 0bda:2838 >/dev/null 2>&1
+    return
+  fi
+
+  for device_path in /sys/bus/usb/devices/*; do
+    [ -f "$device_path/idVendor" ] || continue
+    [ -f "$device_path/idProduct" ] || continue
+    vendor="$(cat "$device_path/idVendor" 2>/dev/null || true)"
+    product="$(cat "$device_path/idProduct" 2>/dev/null || true)"
+    serial="$(cat "$device_path/serial" 2>/dev/null || true)"
+
+    if [ "$vendor" = "0bda" ] && { [ "$product" = "2832" ] || [ "$product" = "2838" ]; } && [ "$serial" = "$wanted_serial" ]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+for _ in $(seq 1 "$RETRY_COUNT"); do
+  if rtl_present; then
+    systemctl restart "$SERVICE"
+    exit 0
+  fi
+  sleep "$RETRY_DELAY"
+done
