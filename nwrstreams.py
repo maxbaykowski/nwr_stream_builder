@@ -1159,7 +1159,14 @@ def toggle_iqbus_start_on_boot() -> None:
 
 
 def delete_iqbus_server_configuration() -> None:
-    response = input("Are you sure you want to stop using this machine as an SDR server? (y/n): ").strip().lower()
+    config_text = read_iqbus_config() if IQBUS_CONFIG_PATH.exists() else ""
+    current_port = configured_iqbus_port(config_text) if config_text else None
+    if current_port is not None and iqbus_clients_detected(current_port):
+        response = input(
+            "Warning: Clients may be connected to this SDR server, and making this change will disconnect them. Continue? (y/n): "
+        ).strip().lower()
+    else:
+        response = input("Are you sure you want to stop using this machine as an SDR server? (y/n): ").strip().lower()
     if response not in ("y", "yes"):
         print("Server configuration was not removed.")
         return
@@ -1569,6 +1576,37 @@ def get_process_name_for_bound_port(port: int) -> str | None:
     return None
 
 
+def configured_iqbus_port(config_text: str) -> int | None:
+    port_value = get_config_value(config_text, "port")
+    if not port_value or not port_value.isdigit():
+        return None
+    return int(port_value)
+
+
+def iqbus_clients_detected(port: int) -> bool:
+    ss = shutil.which("ss")
+    if not ss:
+        return False
+
+    result = run_command(
+        [ss, "-Htan", "state", "established", f"( sport = :{port} )"],
+        check=False,
+    )
+    return any(line.strip() for line in result.stdout.splitlines())
+
+
+def confirm_iqbus_client_disconnect() -> bool:
+    while True:
+        response = input(
+            "Warning: Clients may be connected to this SDR server, and making this change will disconnect them. Continue? (y/n): "
+        ).strip().lower()
+        if response in ("y", "yes"):
+            return True
+        if response in ("n", "no"):
+            return False
+        print("Enter y to continue or n to cancel.")
+
+
 def prompt_for_port(current_value: int | None) -> int:
     while True:
         print()
@@ -1602,10 +1640,14 @@ def prompt_for_port(current_value: int | None) -> int:
 
 def configure_port() -> None:
     config_text = read_iqbus_config()
-    current_value = get_config_value(config_text, "port")
-    current_port = int(current_value) if current_value and current_value.isdigit() else None
+    current_port = configured_iqbus_port(config_text)
 
     port = prompt_for_port(current_port)
+    if port != current_port and current_port is not None and iqbus_clients_detected(current_port):
+        if not confirm_iqbus_client_disconnect():
+            print()
+            print("Server port was not changed.")
+            return
     updated_config = update_config_value(config_text, "port", str(port))
     write_config_and_restart(updated_config)
 
@@ -1665,6 +1707,13 @@ def start_sdr_server() -> None:
 
 
 def stop_sdr_server() -> None:
+    config_text = read_iqbus_config()
+    current_port = configured_iqbus_port(config_text)
+    if current_port is not None and iqbus_clients_detected(current_port):
+        if not confirm_iqbus_client_disconnect():
+            print()
+            print("SDR server was not stopped.")
+            return
     stop_iqbus_service()
 
 
