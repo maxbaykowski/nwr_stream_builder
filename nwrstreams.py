@@ -128,6 +128,14 @@ class RtlDevice:
         return " | ".join(details)
 
 
+@dataclass
+class ConnectedUsbRtlDevice:
+    serial: str | None
+    usb_id: str
+    busnum: str
+    devnum: str
+
+
 class SetupError(RuntimeError):
     pass
 
@@ -721,6 +729,41 @@ def list_rtl_devices() -> list[RtlDevice]:
     return devices
 
 
+def list_connected_rtl_usb_devices() -> list[ConnectedUsbRtlDevice]:
+    devices: list[ConnectedUsbRtlDevice] = []
+    for device_path in Path("/sys/bus/usb/devices").iterdir():
+        if not device_path.is_dir():
+            continue
+
+        try:
+            vendor = (device_path / "idVendor").read_text(encoding="utf-8").strip().lower()
+            product = (device_path / "idProduct").read_text(encoding="utf-8").strip().lower()
+            busnum = (device_path / "busnum").read_text(encoding="utf-8").strip()
+            devnum = (device_path / "devnum").read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+
+        usb_id = f"{vendor}:{product}"
+        if usb_id not in KNOWN_RTL_USB_IDS:
+            continue
+
+        try:
+            serial = (device_path / "serial").read_text(encoding="utf-8").strip()
+        except OSError:
+            serial = None
+
+        devices.append(
+            ConnectedUsbRtlDevice(
+                serial=serial or None,
+                usb_id=usb_id,
+                busnum=busnum,
+                devnum=devnum,
+            )
+        )
+
+    return devices
+
+
 def ensure_root() -> None:
     if os.geteuid() != 0:
         raise SetupError("You must run this program as root.")
@@ -1148,6 +1191,41 @@ def configured_iqbus_device_is_present(config_text: str) -> bool:
     return bool(devices)
 
 
+def configured_iqbus_device_serial(config_text: str) -> str | None:
+    configured_serial = (get_config_value(config_text, "device_serial") or "").strip().strip('"')
+    return configured_serial or None
+
+
+def configured_iqbus_usb_reset_target(config_text: str) -> ConnectedUsbRtlDevice | None:
+    if shutil.which("usbreset") is None:
+        return None
+
+    configured_serial = configured_iqbus_device_serial(config_text)
+    if not configured_serial:
+        return None
+
+    matching_devices = [
+        device for device in list_connected_rtl_usb_devices() if device.serial == configured_serial
+    ]
+    if len(matching_devices) != 1:
+        return None
+
+    device = matching_devices[0]
+    if not (device.busnum.isdigit() and device.devnum.isdigit()):
+        return None
+
+    return device
+
+
+def wait_for_rtl_serial(serial: str, timeout_seconds: float = 15.0) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if any(device.serial == serial for device in list_connected_rtl_usb_devices()):
+            return True
+        time.sleep(0.2)
+    return any(device.serial == serial for device in list_connected_rtl_usb_devices())
+
+
 def list_alternative_rtl_devices(config_text: str) -> tuple[list[RtlDevice], bool]:
     devices = list_rtl_devices()
     configured_serial = (get_config_value(config_text, "device_serial") or "").strip().strip('"')
@@ -1299,6 +1377,26 @@ def switch_iqbus_device() -> None:
 
     print()
     print(f"SDR server now uses {selected_device.label()}.")
+
+
+def reset_iqbus_usb_port() -> None:
+    config_text = read_iqbus_config()
+    target = configured_iqbus_usb_reset_target(config_text)
+    configured_serial = configured_iqbus_device_serial(config_text)
+    if target is None or configured_serial is None:
+        raise SetupError("USB reset is unavailable for the configured SDR.")
+
+    usbreset = shutil.which("usbreset")
+    if usbreset is None:
+        raise SetupError("usbreset was not found, so the USB port cannot be reset.")
+
+    device_path = f"{int(target.busnum):03d}/{int(target.devnum):03d}"
+    run_command([usbreset, device_path])
+    if not wait_for_rtl_serial(configured_serial):
+        raise SetupError("The configured RTL SDR did not come back after the USB reset.")
+
+    print()
+    print("USB port reset complete.")
 
 
 def prompt_for_manual_gain(current_value: float | None) -> float:
@@ -1535,6 +1633,7 @@ def server_settings_menu() -> None:
         current_sample_rate = get_config_value(config_text, "band_sampling_rate") or "unknown"
         agc_enabled = gain_mode_is_hardware_agc(config_text)
         current_port = get_config_value(config_text, "port") or "unknown"
+        usb_reset_available = configured_iqbus_usb_reset_target(config_text) is not None
 
         options = [
             "Stop SDR Server" if server_running else "Start SDR Server",
@@ -1565,6 +1664,8 @@ def server_settings_menu() -> None:
             f"Bias Tee: {'on' if bias_tee_enabled else 'off'} "
             "(supplies DC power for active antennas or LNAs)"
         )
+        if usb_reset_available:
+            options.append("Reset USB port for configured SDR")
         options.append("Switch SDR dongle")
         options.append("Delete server configuration")
 
@@ -1577,6 +1678,22 @@ def server_settings_menu() -> None:
         if selection == -1:
             return
 
+        port_index = 3 if server_running else 2
+        sample_rate_index = port_index + 1
+        agc_index = sample_rate_index + 1
+        if agc_enabled:
+            ppm_index = agc_index + 1
+            bias_tee_index = ppm_index + 1
+            reset_usb_index = bias_tee_index + 1 if usb_reset_available else None
+            switch_dongle_index = bias_tee_index + (2 if usb_reset_available else 1)
+        else:
+            manual_gain_index = agc_index + 1
+            ppm_index = manual_gain_index + 1
+            bias_tee_index = ppm_index + 1
+            reset_usb_index = bias_tee_index + 1 if usb_reset_available else None
+            switch_dongle_index = bias_tee_index + (2 if usb_reset_available else 1)
+        delete_server_index = switch_dongle_index + 1
+
         if selection == 0:
             if server_running:
                 stop_sdr_server()
@@ -1586,37 +1703,25 @@ def server_settings_menu() -> None:
             toggle_iqbus_start_on_boot()
         elif selection == 2 and server_running:
             restart_sdr_server()
-        elif selection == (3 if server_running else 2):
+        elif selection == port_index:
             configure_port()
-        elif selection == (4 if server_running else 3):
+        elif selection == sample_rate_index:
             configure_sample_rate()
-        elif selection == (5 if server_running else 4):
+        elif selection == agc_index:
             toggle_hardware_agc()
-        elif selection == (6 if server_running else 5):
-            if agc_enabled:
-                configure_ppm()
-            else:
-                configure_manual_gain()
-        elif selection == (7 if server_running else 6):
-            if agc_enabled:
-                toggle_bias_tee()
-            else:
-                configure_ppm()
-        elif selection == (8 if server_running else 7):
-            if not agc_enabled:
-                toggle_bias_tee()
-            else:
-                switch_iqbus_device()
-        elif selection == (9 if server_running else 8):
-            if not agc_enabled:
-                switch_iqbus_device()
-            else:
-                delete_iqbus_server_configuration()
-                return
-        elif selection == (10 if server_running else 9):
-            if not agc_enabled:
-                delete_iqbus_server_configuration()
-                return
+        elif not agc_enabled and selection == manual_gain_index:
+            configure_manual_gain()
+        elif selection == ppm_index:
+            configure_ppm()
+        elif selection == bias_tee_index:
+            toggle_bias_tee()
+        elif reset_usb_index is not None and selection == reset_usb_index:
+            reset_iqbus_usb_port()
+        elif selection == switch_dongle_index:
+            switch_iqbus_device()
+        elif selection == delete_server_index:
+            delete_iqbus_server_configuration()
+            return
 
 
 def configure_server() -> None:
