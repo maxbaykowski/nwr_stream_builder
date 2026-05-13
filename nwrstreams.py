@@ -178,6 +178,28 @@ def run_command(command: list[str], check: bool = True) -> subprocess.CompletedP
         raise SetupError(message) from error
 
 
+def clear_console() -> None:
+    if not sys.stdout.isatty():
+        return
+    sys.stdout.write("\033[2J\033[H")
+    sys.stdout.flush()
+
+
+def prompt_yes_no(prompt: str, *, default: bool | None = None) -> bool:
+    while True:
+        response = input(prompt).strip().lower()
+        if response in ("y", "yes"):
+            clear_console()
+            return True
+        if response in ("n", "no"):
+            clear_console()
+            return False
+        if response == "" and default is not None:
+            clear_console()
+            return default
+        print("Enter y to continue or n to cancel.")
+
+
 def prompt_menu(title: str, options: list[str]) -> int:
     while True:
         print()
@@ -185,16 +207,18 @@ def prompt_menu(title: str, options: list[str]) -> int:
         for index, option in enumerate(options, start=1):
             print(f"{index}. {option}")
 
-        selection = input("Select an option: ").strip()
-        if not selection.isdigit():
-            print("Enter the number for the option you want.")
-            continue
+        while True:
+            selection = input("Select an option: ").strip()
+            if not selection.isdigit():
+                print("Enter the number for the option you want.")
+                continue
 
-        selected_index = int(selection)
-        if 1 <= selected_index <= len(options):
-            return selected_index - 1
+            selected_index = int(selection)
+            if 1 <= selected_index <= len(options):
+                clear_console()
+                return selected_index - 1
 
-        print("That selection is not available.")
+            print("That selection is not available.")
 
 
 def prompt_menu_with_back(title: str, options: list[str], back_label: str) -> int:
@@ -205,18 +229,21 @@ def prompt_menu_with_back(title: str, options: list[str], back_label: str) -> in
         for index, option in enumerate(options, start=1):
             print(f"{index}. {option}")
 
-        selection = input("Select an option: ").strip()
-        if not selection.isdigit():
-            print("Enter the number for the option you want.")
-            continue
+        while True:
+            selection = input("Select an option: ").strip()
+            if not selection.isdigit():
+                print("Enter the number for the option you want.")
+                continue
 
-        selected_index = int(selection)
-        if selected_index == 0:
-            return -1
-        if 1 <= selected_index <= len(options):
-            return selected_index - 1
+            selected_index = int(selection)
+            if selected_index == 0:
+                clear_console()
+                return -1
+            if 1 <= selected_index <= len(options):
+                clear_console()
+                return selected_index - 1
 
-        print("That selection is not available.")
+            print("That selection is not available.")
 
 
 def prompt_with_prefill(prompt: str, prefill: str) -> str:
@@ -1162,12 +1189,12 @@ def delete_iqbus_server_configuration() -> None:
     config_text = read_iqbus_config() if IQBUS_CONFIG_PATH.exists() else ""
     current_port = configured_iqbus_port(config_text) if config_text else None
     if current_port is not None and iqbus_clients_detected(current_port):
-        response = input(
+        confirmed = prompt_yes_no(
             "Warning: Clients may be connected to this SDR server, and making this change will disconnect them. Continue? (y/n): "
-        ).strip().lower()
+        )
     else:
-        response = input("Are you sure you want to stop using this machine as an SDR server? (y/n): ").strip().lower()
-    if response not in ("y", "yes"):
+        confirmed = prompt_yes_no("Are you sure you want to stop using this machine as an SDR server? (y/n): ")
+    if not confirmed:
         print("Server configuration was not removed.")
         return
 
@@ -1361,17 +1388,11 @@ def confirm_high_sample_rate(sample_rate: int) -> bool:
     if sample_rate <= USB_WARNING_SAMPLE_RATE:
         return True
 
-    while True:
-        response = input(
-            "Warning: going above 2560000 samples/second may result in dropped "
-            "samples over USB. Are you sure? (Y/n): "
-        ).strip().lower()
-        if response in ("", "y", "yes"):
-            return True
-        if response in ("n", "no"):
-            return False
-
-        print("Enter y to continue or n to cancel.")
+    return prompt_yes_no(
+        "Warning: going above 2560000 samples/second may result in dropped "
+        "samples over USB. Are you sure? (Y/n): ",
+        default=True,
+    )
 
 
 def configure_sample_rate() -> None:
@@ -1596,15 +1617,9 @@ def iqbus_clients_detected(port: int) -> bool:
 
 
 def confirm_iqbus_client_disconnect() -> bool:
-    while True:
-        response = input(
-            "Warning: Clients may be connected to this SDR server, and making this change will disconnect them. Continue? (y/n): "
-        ).strip().lower()
-        if response in ("y", "yes"):
-            return True
-        if response in ("n", "no"):
-            return False
-        print("Enter y to continue or n to cancel.")
+    return prompt_yes_no(
+        "Warning: Clients may be connected to this SDR server, and making this change will disconnect them. Continue? (y/n): "
+    )
 
 
 def prompt_for_port(current_value: int | None) -> int:
@@ -1660,19 +1675,13 @@ def bias_tee_is_enabled(config_text: str) -> bool:
 
 
 def confirm_enable_bias_tee() -> bool:
-    while True:
-        response = input(
-            "Warning: Bias Tee sends DC voltage up the antenna line. Enable it "
-            "only to power active antennas or low noise amplifiers, and do not "
-            "enable it for passive antennas such as telescoping antennas, "
-            "dipole antennas, or J-pole antennas. Continue? (Y/n): "
-        ).strip().lower()
-        if response in ("", "y", "yes"):
-            return True
-        if response in ("n", "no"):
-            return False
-
-        print("Enter y to continue or n to cancel.")
+    return prompt_yes_no(
+        "Warning: Bias Tee sends DC voltage up the antenna line. Enable it "
+        "only to power active antennas or low noise amplifiers, and do not "
+        "enable it for passive antennas such as telescoping antennas, "
+        "dipole antennas, or J-pole antennas. Continue? (Y/n): ",
+        default=True,
+    )
 
 
 def toggle_bias_tee() -> None:
@@ -2089,14 +2098,6 @@ def prompt_output_credentials(
     exclude: tuple[str, str] | None = None,
 ) -> IcecastOutput | None:
     while True:
-        print()
-        print("Icecast Output")
-        print("0. Back")
-        options = build_output_options(output, station)
-        for index, option in enumerate(options, start=1):
-            print(f"{index}. {option}")
-
-        selection = input("Select an option: ").strip()
         provider = output_provider(output, station)
         editable_fields: list[str] = []
         if provider == "custom":
@@ -2110,52 +2111,67 @@ def prompt_output_credentials(
             editable_fields = ["mountpoint"]
         confirm_index = len(editable_fields) + 1 if output_fields_complete(output) else None
 
-        if not selection:
-            if confirm_index is None:
-                print("One or more fields are left blank.")
+        print()
+        print("Icecast Output")
+        print("0. Back")
+        options = build_output_options(output, station)
+        for index, option in enumerate(options, start=1):
+            print(f"{index}. {option}")
+
+        while True:
+            selection = input("Select an option: ").strip()
+            if not selection:
+                if confirm_index is None:
+                    print("One or more fields are left blank.")
+                    continue
+                clear_console()
+                success, message = authenticate_output(output)
+                print()
+                print(message)
+                if success:
+                    if provider == "noaa_radio_org":
+                        show_noaa_radio_org_submission_notice()
+                    return output
                 continue
-            success, message = authenticate_output(output)
-            print()
-            print(message)
-            if success:
-                if provider == "noaa_radio_org":
-                    show_noaa_radio_org_submission_notice()
-                return output
-            continue
 
-        if not selection.isdigit():
-            print("Enter the number for the option you want.")
-            continue
+            if not selection.isdigit():
+                print("Enter the number for the option you want.")
+                continue
 
-        selected_index = int(selection)
-        if selected_index == 0:
-            return None
-        if 1 <= selected_index <= len(editable_fields):
-            field = editable_fields[selected_index - 1]
-            if field == "server":
-                output.server = prompt_custom_output_server(output.server)
-            elif field == "port":
-                output.port = prompt_output_port(output.port)
-            elif field == "username":
-                output.username = prompt_text("Username: ", output.username).strip()
-            elif field == "password":
-                output.password = prompt_text("Password: ", output.password, hidden=True, allow_toggle=True)
-            elif field == "mountpoint":
-                if provider == "noaa_radio_org":
-                    if station is None:
-                        raise SetupError("Station metadata is required for NOAA Weather Radio Org outputs.")
-                    output.mountpoint = prompt_noaa_mountpoint(station, output.mountpoint, exclude=exclude)
-                else:
-                    output.mountpoint = normalize_mountpoint(prompt_text("Mountpoint: ", output.mountpoint).strip())
-        elif confirm_index is not None and selected_index == confirm_index:
-            success, message = authenticate_output(output)
-            print()
-            print(message)
-            if success:
-                if provider == "noaa_radio_org":
-                    show_noaa_radio_org_submission_notice()
-                return output
-        else:
+            selected_index = int(selection)
+            if selected_index == 0:
+                clear_console()
+                return None
+            if 1 <= selected_index <= len(editable_fields):
+                clear_console()
+                field = editable_fields[selected_index - 1]
+                if field == "server":
+                    output.server = prompt_custom_output_server(output.server)
+                elif field == "port":
+                    output.port = prompt_output_port(output.port)
+                elif field == "username":
+                    output.username = prompt_text("Username: ", output.username).strip()
+                elif field == "password":
+                    output.password = prompt_text("Password: ", output.password, hidden=True, allow_toggle=True)
+                elif field == "mountpoint":
+                    if provider == "noaa_radio_org":
+                        if station is None:
+                            raise SetupError("Station metadata is required for NOAA Weather Radio Org outputs.")
+                        output.mountpoint = prompt_noaa_mountpoint(station, output.mountpoint, exclude=exclude)
+                    else:
+                        output.mountpoint = normalize_mountpoint(prompt_text("Mountpoint: ", output.mountpoint).strip())
+                break
+            if confirm_index is not None and selected_index == confirm_index:
+                clear_console()
+                success, message = authenticate_output(output)
+                print()
+                print(message)
+                if success:
+                    if provider == "noaa_radio_org":
+                        show_noaa_radio_org_submission_notice()
+                    return output
+                break
+
             print("That selection is not available.")
 
 
@@ -2441,8 +2457,7 @@ def restart_stream_service(callsign_lower: str) -> None:
 
 
 def delete_stream(callsign_lower: str) -> None:
-    response = input("Delete this stream? (y/n): ").strip().lower()
-    if response not in ("y", "yes"):
+    if not prompt_yes_no("Delete this stream? (y/n): "):
         print("Stream was not deleted.")
         return
 
@@ -2914,8 +2929,7 @@ def create_stream() -> None:
 
 
 def remove_output_from_stream(callsign_lower: str, parsed_output: ParsedIcecastOutput) -> None:
-    response = input("Remove this output? (y/n): ").strip().lower()
-    if response not in ("y", "yes"):
+    if not prompt_yes_no("Remove this output? (y/n): "):
         print("Output was not removed.")
         return
 
@@ -3200,31 +3214,37 @@ def edit_output_menu(
         for index, option in enumerate(options, start=1):
             print(f"{index}. {option}")
 
-        selection = input("Select an option: ").strip()
-        if not selection.isdigit():
-            print("Enter the number for the option you want.")
-            continue
+        while True:
+            selection = input("Select an option: ").strip()
+            if not selection.isdigit():
+                print("Enter the number for the option you want.")
+                continue
 
-        selected_index = int(selection)
-        if selected_index == 0:
-            return
-        if selected_index == 1:
-            updated_output = prompt_output_credentials(
-                output,
-                station=station,
-                exclude=(callsign_lower, parsed_output.output.mountpoint),
-            )
-            if updated_output is not None:
-                update_output_in_stream(callsign_lower, parsed_output, updated_output)
+            selected_index = int(selection)
+            if selected_index == 0:
+                clear_console()
                 return
-        elif bitrate_index is not None and selected_index == bitrate_index:
-            output.bitrate = prompt_output_bitrate(output)
-            update_output_in_stream(callsign_lower, parsed_output, output)
-            return
-        elif selected_index == remove_index:
-            remove_output_from_stream(callsign_lower, parsed_output)
-            return
-        else:
+            if selected_index == 1:
+                clear_console()
+                updated_output = prompt_output_credentials(
+                    output,
+                    station=station,
+                    exclude=(callsign_lower, parsed_output.output.mountpoint),
+                )
+                if updated_output is not None:
+                    update_output_in_stream(callsign_lower, parsed_output, updated_output)
+                    return
+                break
+            if bitrate_index is not None and selected_index == bitrate_index:
+                clear_console()
+                output.bitrate = prompt_output_bitrate(output)
+                update_output_in_stream(callsign_lower, parsed_output, output)
+                return
+            if selected_index == remove_index:
+                clear_console()
+                remove_output_from_stream(callsign_lower, parsed_output)
+                return
+
             print("That selection is not available.")
 
 
