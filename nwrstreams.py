@@ -2456,11 +2456,7 @@ def restart_stream_service(callsign_lower: str) -> None:
     run_command(["systemctl", "restart", f"{callsign_lower}.service"])
 
 
-def delete_stream(callsign_lower: str) -> None:
-    if not prompt_yes_no("Delete this stream? (y/n): "):
-        print("Stream was not deleted.")
-        return
-
+def delete_stream_files(callsign_lower: str) -> None:
     service_name = f"{callsign_lower}.service"
     service_path = STREAM_SERVICE_DIR / service_name
     liq_path = LIQUIDSOAP_BIN_DIR / f"{callsign_lower}.liq"
@@ -2479,6 +2475,14 @@ def delete_stream(callsign_lower: str) -> None:
 
     print()
     print(f"Stream {callsign_lower.upper()} deleted.")
+
+
+def delete_stream(callsign_lower: str) -> None:
+    if not prompt_yes_no("Delete this stream? (y/n): "):
+        print("Stream was not deleted.")
+        return
+
+    delete_stream_files(callsign_lower)
 
 
 def output_menu_label(output: IcecastOutput) -> str:
@@ -3329,7 +3333,23 @@ def manage_streams() -> None:
         if selection == len(options) - 1:
             create_stream()
         else:
-            stream_menu(existing_streams[selection])
+            callsign = existing_streams[selection]
+            callsign_lower = callsign.lower()
+            try:
+                stream_menu(callsign)
+            except SetupError as error:
+                message = str(error)
+                if message == f"Could not extract stream metadata from {callsign_lower}.liq.":
+                    print()
+                    print(f"Setup failed: {error}", file=sys.stderr)
+                    if prompt_yes_no(
+                        f"Do you want to remove the broken stream {callsign_lower.upper()}? (y/n): "
+                    ):
+                        delete_stream_files(callsign_lower)
+                    else:
+                        print("Stream was not deleted.")
+                    continue
+                raise
 
 
 def main_menu() -> int:
