@@ -747,10 +747,25 @@ def list_connected_rtl_usb_devices() -> list[ConnectedUsbRtlDevice]:
         if usb_id not in KNOWN_RTL_USB_IDS:
             continue
 
+        serial: str | None
         try:
-            serial = (device_path / "serial").read_text(encoding="utf-8").strip()
+            serial = (device_path / "serial").read_text(encoding="utf-8").strip() or None
         except OSError:
             serial = None
+
+        if not serial and shutil.which("udevadm"):
+            udev_result = run_command(
+                ["udevadm", "info", "--query=property", f"--path={device_path}"],
+                check=False,
+            )
+            if udev_result.returncode == 0:
+                for line in udev_result.stdout.splitlines():
+                    if line.startswith("ID_SERIAL_SHORT="):
+                        serial = line.split("=", 1)[1].strip() or None
+                        break
+                    if line.startswith("ID_USB_SERIAL_SHORT="):
+                        serial = line.split("=", 1)[1].strip() or None
+                        break
 
         devices.append(
             ConnectedUsbRtlDevice(
