@@ -460,10 +460,14 @@ def provider_hosts() -> set[str]:
 def bitrate_limits_for_output(output: IcecastOutput) -> tuple[int, int]:
     host = output_host(output).lower()
     if host == "ingest.wxr.gwes-cdn.net":
-        return (64, 128)
+        return (64, 320)
     if host == "radio-master.weatherusa.net":
-        return (16, 56)
-    return (16, 320)
+        return (32, 56)
+    return (8, 320)
+
+
+def output_bitrate_editable(output: IcecastOutput, station: dict[str, str] | None = None) -> bool:
+    return output_provider(output, station) != "noaa_radio_org"
 
 
 def prompt_output_bitrate(output: IcecastOutput) -> str:
@@ -1948,7 +1952,6 @@ def build_output_options(output: IcecastOutput, station: dict[str, str] | None =
         [
             f"Password: {'*' * len(output.password) if output.password else '(blank)'}",
             f"Mountpoint: {output.mountpoint or '(blank)'}",
-            f"Bitrate: {output.bitrate or '(blank)'} kbps",
         ]
     )
     if output_fields_complete(output):
@@ -2045,7 +2048,7 @@ def prompt_output_credentials(
             editable_fields.append("username")
         elif provider == "noaa_radio_org":
             editable_fields.extend(["mountpoint"])
-        editable_fields.extend(["password", "mountpoint", "bitrate"])
+        editable_fields.extend(["password", "mountpoint"])
         if provider == "noaa_radio_org":
             editable_fields = ["mountpoint"]
         confirm_index = len(editable_fields) + 1 if output_fields_complete(output) else None
@@ -2087,8 +2090,6 @@ def prompt_output_credentials(
                     output.mountpoint = prompt_noaa_mountpoint(station, output.mountpoint, exclude=exclude)
                 else:
                     output.mountpoint = normalize_mountpoint(prompt_text("Mountpoint: ", output.mountpoint).strip())
-            elif field == "bitrate":
-                output.bitrate = prompt_output_bitrate(output)
         elif confirm_index is not None and selected_index == confirm_index:
             success, message = authenticate_output(output)
             print()
@@ -2129,6 +2130,8 @@ def prompt_icecast_output(station: dict[str, str] | None) -> IcecastOutput | Non
                 result = prompt_output_credentials(default_noaa_radio_org_output(station), station=station)
         else:
             result = prompt_output_credentials(default_manual_output(), station=station)
+            if result is not None:
+                result.bitrate = prompt_output_bitrate(result)
         if result is not None:
             return result
 
@@ -3125,60 +3128,22 @@ def edit_output_menu(
     parsed_output: ParsedIcecastOutput,
     station: dict[str, str] | None,
 ) -> None:
-    output = IcecastOutput(**vars(parsed_output.output))
     while True:
+        output = IcecastOutput(**vars(parsed_output.output))
         print()
         print("Edit Output")
         print("0. Back")
-        provider = output_provider(output, station)
-        editable_fields: list[str] = []
-        options = []
-        if provider == "custom":
-            editable_fields.extend(["server", "port", "username"])
-            options.extend(
-                [
-                    f"Server: {output.server or '(blank)'}",
-                    f"Port: {output.port or '(blank)'}",
-                    f"Username: {output.username or '(blank)'}",
-                ]
-            )
-        elif provider == "gwes":
-            editable_fields.append("username")
-            options.append(f"Username: {output.username or '(blank)'}")
-        elif provider == "noaa_radio_org":
-            editable_fields.append("mountpoint")
-            options.append(f"Mountpoint: {output.mountpoint or '(blank)'}")
-        if provider != "noaa_radio_org":
-            editable_fields.extend(["password", "mountpoint", "bitrate"])
-            options.extend(
-                [
-                    f"Password: {'*' * len(output.password) if output.password else '(blank)'}",
-                    f"Mountpoint: {output.mountpoint or '(blank)'}",
-                    f"Bitrate: {output.bitrate or '(blank)'} kbps",
-                ]
-            )
-        confirm_index = None
-        if output_fields_complete(output):
-            options.append("Confirm")
-            confirm_index = len(options)
+        options = ["Icecast credentials"]
+        bitrate_index = None
+        if output_bitrate_editable(output, station):
+            options.append(f"Bitrate: {output.bitrate or '(blank)'} kbps")
+            bitrate_index = len(options)
         options.append("Remove Output")
         remove_index = len(options)
         for index, option in enumerate(options, start=1):
             print(f"{index}. {option}")
 
         selection = input("Select an option: ").strip()
-        if not selection:
-            if not output_fields_complete(output):
-                print("One or more fields are left blank.")
-                continue
-            success, message = authenticate_output(output)
-            print()
-            print(message)
-            if success:
-                update_output_in_stream(callsign_lower, parsed_output, output)
-                return
-            continue
-
         if not selection.isdigit():
             print("Enter the number for the option you want.")
             continue
@@ -3186,36 +3151,19 @@ def edit_output_menu(
         selected_index = int(selection)
         if selected_index == 0:
             return
-        if 1 <= selected_index <= len(editable_fields):
-            field = editable_fields[selected_index - 1]
-            if field == "server":
-                output.server = prompt_custom_output_server(output.server)
-            elif field == "port":
-                output.port = prompt_output_port(output.port)
-            elif field == "username":
-                output.username = prompt_text("Username: ", output.username).strip()
-            elif field == "password":
-                output.password = prompt_text("Password: ", output.password, hidden=True, allow_toggle=True)
-            elif field == "mountpoint":
-                if provider == "noaa_radio_org":
-                    output.mountpoint = prompt_noaa_mountpoint(
-                        station,
-                        output.mountpoint,
-                        exclude=(callsign_lower, parsed_output.output.mountpoint),
-                    )
-                else:
-                    output.mountpoint = normalize_mountpoint(prompt_text("Mountpoint: ", output.mountpoint).strip())
-            elif field == "bitrate":
-                output.bitrate = prompt_output_bitrate(output)
-        elif confirm_index is not None and selected_index == confirm_index:
-            success, message = authenticate_output(output)
-            print()
-            print(message)
-            if success:
-                if provider == "noaa_radio_org":
-                    show_noaa_radio_org_submission_notice()
-                update_output_in_stream(callsign_lower, parsed_output, output)
+        if selected_index == 1:
+            updated_output = prompt_output_credentials(
+                output,
+                station=station,
+                exclude=(callsign_lower, parsed_output.output.mountpoint),
+            )
+            if updated_output is not None:
+                update_output_in_stream(callsign_lower, parsed_output, updated_output)
                 return
+        elif bitrate_index is not None and selected_index == bitrate_index:
+            output.bitrate = prompt_output_bitrate(output)
+            update_output_in_stream(callsign_lower, parsed_output, output)
+            return
         elif selected_index == remove_index:
             remove_output_from_stream(callsign_lower, parsed_output)
             return
