@@ -2702,6 +2702,27 @@ def extract_stream_metadata_from_config(callsign_lower: str, config_text: str) -
     }
 
 
+def read_stream_server_settings_from_config(config_text: str) -> tuple[str, int]:
+    server_match = re.search(r'^server="([^"]+)"', config_text, re.MULTILINE)
+    port_match = re.search(r"^port=(\d+)", config_text, re.MULTILINE)
+    if not server_match or not port_match:
+        raise SetupError("Could not extract SDR server settings from the stream config.")
+    return (server_match.group(1), int(port_match.group(1)))
+
+
+def read_stream_server_settings(callsign_lower: str) -> tuple[str, int]:
+    return read_stream_server_settings_from_config(read_stream_config(callsign_lower))
+
+
+def read_stream_iq_probe_settings(callsign_lower: str) -> tuple[int, int]:
+    config_text = read_stream_config(callsign_lower)
+    samplerate_match = re.search(r"^samplerate=(\d+)", config_text, re.MULTILINE)
+    freq_match = re.search(r"^freq=(\d+)", config_text, re.MULTILINE)
+    if not samplerate_match or not freq_match:
+        raise SetupError("Could not extract SDR probe settings from the stream config.")
+    return (int(samplerate_match.group(1)), int(freq_match.group(1)))
+
+
 def read_stream_eas_settings(callsign_lower: str) -> dict[str, int]:
     config_text = read_stream_config(callsign_lower)
     defaults = {
@@ -2773,7 +2794,13 @@ def ensure_stream_liquidsoap_controls(callsign_lower: str) -> bool:
         raise SetupError(f"Could not upgrade {callsign_lower}.liq because no Icecast outputs were found.")
 
     metadata = extract_stream_metadata_from_config(callsign_lower, config_text)
-    rebuilt_config = build_stream_liquidsoap(metadata, outputs[0].output, eas_recording_enabled=eas_enabled)
+    iqbus_server = read_stream_server_settings_from_config(config_text)
+    rebuilt_config = build_stream_liquidsoap(
+        metadata,
+        outputs[0].output,
+        eas_recording_enabled=eas_enabled,
+        iqbus_server=iqbus_server,
+    )
     for parsed_output in outputs[1:]:
         rebuilt_config = rebuilt_config.rstrip() + "\n\n" + build_output_block(parsed_output.output) + "\n"
     write_stream_config(callsign_lower, rebuilt_config)
@@ -2818,10 +2845,112 @@ def set_stream_eas_timing_setting(callsign_lower: str, key: str, value: int) -> 
     restart_stream_service(callsign_lower)
 
 
+def update_stream_server_setting_in_config(config_text: str, key: str, value: str | int) -> str:
+    if key == "server":
+        pattern = r'^server="[^"]*"\s*$'
+        replacement = f'server="{value}"'
+    elif key == "port":
+        pattern = r"^port=\d+\s*$"
+        replacement = f"port={value}"
+    else:
+        raise SetupError(f"Unsupported stream server setting: {key}")
+
+    updated_config, count = re.subn(pattern, replacement, config_text, count=1, flags=re.MULTILINE)
+    if count != 1:
+        raise SetupError(f"Could not update {key} in stream config.")
+    return updated_config
+
+
+def validate_stream_server_endpoint(host: str, port: int, samplerate: int, frequency_hz: int) -> None:
+    command = [
+        "sdr_server_client",
+        "-k",
+        host,
+        "-p",
+        str(port),
+        "-s",
+        str(samplerate),
+        "-b",
+        "162475000",
+        "-f",
+        str(frequency_hz),
+        "-",
+    ]
+    required_bytes = 4096
+    deadline = time.monotonic() + 10.0
+    received = 0
+    invalid_request_message = (
+        "Invalid request. Ensure hardware frequency is allowed to be set to 162.475 MHz "
+        f"and that the RTL sampling rate supports decimation to {samplerate} Hz."
+    )
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+    )
+    stdout = process.stdout
+    if stdout is None:
+        process.kill()
+        process.wait()
+        raise SetupError("Failed to capture IQ data from sdr_server_client.")
+
+    try:
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            ready, _, _ = select.select([stdout], [], [], max(0.0, min(0.5, remaining)))
+            if ready:
+                chunk = os.read(stdout.fileno(), 4096)
+                if chunk:
+                    received += len(chunk)
+                    if received >= required_bytes:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait()
+                        return
+                else:
+                    break
+
+            returncode = process.poll()
+            if returncode is None:
+                continue
+            if returncode == 1:
+                raise SetupError(invalid_request_message)
+            if returncode == 255:
+                raise SetupError("Connection failed.")
+            raise SetupError(f"sdr_server_client exited with code {returncode}.")
+
+        returncode = process.poll()
+        if returncode == 1:
+            raise SetupError(invalid_request_message)
+        if returncode == 255:
+            raise SetupError("Connection failed.")
+        if received <= 0:
+            raise SetupError("Connection timeout. No IQ data was received within 10 seconds.")
+        raise SetupError("Connection timeout. Not enough IQ data was received within 10 seconds.")
+    finally:
+        if process.poll() is None:
+            process.kill()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
 def build_stream_liquidsoap(
-    station: dict[str, str], output: IcecastOutput, eas_recording_enabled: bool = True
+    station: dict[str, str],
+    output: IcecastOutput,
+    eas_recording_enabled: bool = True,
+    iqbus_server: tuple[str, int] | None = None,
 ) -> str:
-    iqbus_host, iqbus_port = read_iqbus_stream_settings()
+    if iqbus_server is None:
+        iqbus_host, iqbus_port = read_iqbus_stream_settings()
+    else:
+        iqbus_host, iqbus_port = iqbus_server
     template = load_template("stream.liq.template")
     output_block = build_output_block(output)
     callsign_lower = station["callsign"].lower()
@@ -2911,6 +3040,10 @@ def create_stream() -> None:
     if station is None:
         return
 
+    iqbus_server = prompt_stream_server_for_creation(station)
+    if iqbus_server is None:
+        return
+
     output = prompt_icecast_output(station)
     if output is None:
         return
@@ -2923,6 +3056,7 @@ def create_stream() -> None:
         station,
         output,
         eas_recording_enabled=eas_recording_available(),
+        iqbus_server=iqbus_server,
     )
     service_text = build_stream_service(callsign_lower)
     write_stream_files(callsign_lower, liquidsoap_text, service_text)
@@ -3029,6 +3163,28 @@ def prompt_fallback_delay(current_value: float) -> float:
         return float(parsed)
 
 
+def prompt_stream_server_host(current_value: str) -> str:
+    while True:
+        value = prompt_text("Server IP address: ", current_value).strip()
+        if not value:
+            print("Enter the server IP address.")
+            continue
+        return value
+
+
+def prompt_stream_server_port(current_value: int) -> int:
+    while True:
+        value = prompt_text("Server port: ", str(current_value)).strip()
+        if not value.isdigit():
+            print("Enter the server port as a whole number.")
+            continue
+        port = int(value)
+        if not 1 <= port <= 65535:
+            print("Server port must be between 1 and 65535.")
+            continue
+        return port
+
+
 def prompt_eas_buffer_seconds(label: str, current_value: int) -> int:
     while True:
         value = prompt_text(f"{label}: ", str(current_value)).strip()
@@ -3087,6 +3243,126 @@ def audio_settings_menu(callsign_lower: str) -> None:
             value = prompt_fallback_delay(settings["fallback_delay"])
             set_stream_audio_setting(callsign_lower, "fallback_delay", value)
             print(f"Fallback delay set to {int(value)} seconds.")
+
+
+def set_stream_server_endpoint(callsign_lower: str, host: str, port: int) -> None:
+    samplerate, frequency_hz = read_stream_iq_probe_settings(callsign_lower)
+    validate_stream_server_endpoint(host, port, samplerate, frequency_hz)
+    config_text = read_stream_config(callsign_lower)
+    updated_config = update_stream_server_setting_in_config(config_text, "server", host)
+    updated_config = update_stream_server_setting_in_config(updated_config, "port", port)
+    write_stream_config(callsign_lower, updated_config)
+    restart_stream_service(callsign_lower)
+
+
+def prompt_stream_server_endpoint(
+    initial_host: str,
+    initial_port: int,
+    samplerate: int,
+    frequency_hz: int,
+    current_endpoint: tuple[str, int] | None = None,
+) -> tuple[str, int] | None:
+    host = initial_host
+    port = initial_port
+    while True:
+        print()
+        print("Stream server settings")
+        print("0. Back")
+        print(f"1. IP address: {host}")
+        print(f"2. Port: {port}")
+        print("3. Confirm")
+
+        while True:
+            selection = input("Select an option: ").strip()
+            if not selection.isdigit():
+                print("Enter the number for the option you want.")
+                continue
+
+            selected_index = int(selection)
+            if selected_index == 0:
+                clear_console()
+                return
+            if selected_index == 1:
+                clear_console()
+                host = prompt_stream_server_host(host)
+                break
+            if selected_index == 2:
+                clear_console()
+                port = prompt_stream_server_port(port)
+                break
+            if selected_index == 3:
+                clear_console()
+                if current_endpoint is not None and (host, port) == current_endpoint:
+                    print("Stream server settings were not changed.")
+                    break
+                try:
+                    validate_stream_server_endpoint(host, port, samplerate, frequency_hz)
+                except SetupError as error:
+                    print()
+                    print(f"Setup failed: {error}", file=sys.stderr)
+                    break
+                return (host, port)
+
+            print("That selection is not available.")
+
+
+def local_stream_server_choice_available() -> bool:
+    if not service_is_running("iqbus.service"):
+        return False
+    try:
+        read_iqbus_stream_settings()
+    except SetupError:
+        return False
+    return True
+
+
+def prompt_stream_server_for_creation(station: dict[str, str]) -> tuple[str, int] | None:
+    default_host, default_port = read_iqbus_stream_settings()
+    if not local_stream_server_choice_available():
+        return prompt_stream_server_endpoint(
+            default_host,
+            default_port,
+            16000,
+            frequency_mhz_to_hz(station["frequency"]),
+        )
+
+    selection = prompt_menu_with_back(
+        "SDR Server",
+        [
+            "Use locally hosted SDR server",
+            "Enter server settings manually",
+        ],
+        "Back to stream setup",
+    )
+    if selection == -1:
+        return None
+    if selection == 0:
+        return (default_host, default_port)
+
+    return prompt_stream_server_endpoint(
+        default_host,
+        default_port,
+        16000,
+        frequency_mhz_to_hz(station["frequency"]),
+    )
+
+
+def stream_server_settings_menu(callsign_lower: str) -> None:
+    current_host, current_port = read_stream_server_settings(callsign_lower)
+    samplerate, frequency_hz = read_stream_iq_probe_settings(callsign_lower)
+    endpoint = prompt_stream_server_endpoint(
+        current_host,
+        current_port,
+        samplerate,
+        frequency_hz,
+        current_endpoint=(current_host, current_port),
+    )
+    if endpoint is None:
+        return
+    host, port = endpoint
+    set_stream_server_endpoint(callsign_lower, host, port)
+    print()
+    print(f"Stream server set to {host}:{port} and stream restarted.")
 
 
 def set_stream_eas_recording_enabled(callsign_lower: str, enabled: bool) -> None:
@@ -3292,32 +3568,36 @@ def stream_menu(callsign: str) -> None:
         report_failed_stream_service(callsign_lower)
         stream_running = service_is_running(service_name)
         start_on_boot = service_starts_on_boot(service_name)
+        server_host, server_port = read_stream_server_settings(callsign_lower)
         options = [
             "Outputs",
+            f"Server: {server_host}:{server_port}",
             "Audio settings",
             "Stop Stream" if stream_running else "Start Stream",
             f"Start Stream On Host Boot: {'on' if start_on_boot else 'off'}",
             "Delete Stream",
         ]
         if eas_recording_available():
-            options.insert(2, "EAS recording settings")
+            options.insert(3, "EAS recording settings")
         selection = prompt_menu_with_back("Manage Stream", options, "Back to streams")
         if selection == -1:
             return
         if selection == 0:
             outputs_menu(callsign_lower, station)
         elif selection == 1:
+            stream_server_settings_menu(callsign_lower)
+        elif selection == 2:
             audio_settings_menu(callsign_lower)
-        elif eas_recording_available() and selection == 2:
+        elif eas_recording_available() and selection == 3:
             eas_recording_settings_menu(callsign_lower)
-        elif selection == (3 if eas_recording_available() else 2):
+        elif selection == (4 if eas_recording_available() else 3):
             if stream_running:
                 stop_stream_service(callsign_lower)
             else:
                 start_stream_service(callsign_lower)
-        elif selection == (4 if eas_recording_available() else 3):
-            toggle_stream_start_on_boot(callsign_lower)
         elif selection == (5 if eas_recording_available() else 4):
+            toggle_stream_start_on_boot(callsign_lower)
+        elif selection == (6 if eas_recording_available() else 5):
             delete_stream(callsign_lower)
             return
 
