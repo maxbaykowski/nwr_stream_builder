@@ -3334,15 +3334,18 @@ def manage_streams() -> None:
 
 def main_menu() -> int:
     while True:
-        selection = prompt_menu(
+        selection = prompt_menu_with_back(
             "NWR Stream Builder",
             [
                 "Server configuration",
                 "Manage streams",
-                "Exit",
             ],
+            "Exit",
         )
 
+        if selection == -1:
+            print("Exiting.")
+            return 0
         if selection == 0:
             try:
                 configure_server()
@@ -3355,9 +3358,6 @@ def main_menu() -> int:
             except SetupError as error:
                 print()
                 print(f"Setup failed: {error}", file=sys.stderr)
-        else:
-            print("Exiting.")
-            return 0
 
 
 def main() -> int:
