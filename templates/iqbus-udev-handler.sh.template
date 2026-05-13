@@ -62,7 +62,11 @@ rtl_present() {
 
 for _ in $(seq 1 "$RETRY_COUNT"); do
   if rtl_present; then
-    systemctl restart "$SERVICE"
+    state="$(systemctl is-active "$SERVICE" 2>/dev/null || true)"
+    if [ "$state" = "activating" ] || [ "$state" = "deactivating" ] || [ "$state" = "reloading" ]; then
+      exit 0
+    fi
+    systemctl --job-mode=fail restart "$SERVICE" >/dev/null 2>&1 || true
     exit 0
   fi
   sleep "$RETRY_DELAY"

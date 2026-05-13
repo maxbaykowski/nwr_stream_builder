@@ -962,6 +962,10 @@ def iqbus_starts_on_boot() -> bool:
     return result.stdout.strip() == "enabled"
 
 
+def run_iqbus_job(action: str) -> subprocess.CompletedProcess[str]:
+    return run_command(["systemctl", "--job-mode=fail", action, "iqbus.service"], check=False)
+
+
 def warn_if_builtin_sdr_server_service_is_active() -> None:
     if not SDR_SERVER_SERVICE_PATH.exists():
         return
@@ -1084,10 +1088,10 @@ def restart_iqbus_if_active() -> bool:
         return False
     result = run_command(["systemctl", "is-active", "--quiet", "iqbus.service"], check=False)
     if result.returncode == 0:
-        restart_result = run_command(["systemctl", "restart", "iqbus.service"], check=False)
+        restart_result = run_iqbus_job("restart")
         if restart_result.returncode != 0:
             print()
-            print(IQBUS_FAILED_MESSAGE)
+            print("Error: SDR server is already changing state. Wait for the current start/stop/restart job to finish.")
             return False
         if wait_for_iqbus_state("active") == "failed":
             report_failed_iqbus_service()
@@ -1100,10 +1104,10 @@ def restart_iqbus_if_not_inactive() -> bool:
     if report_failed_iqbus_service():
         return False
     if iqbus_is_running():
-        restart_result = run_command(["systemctl", "restart", "iqbus.service"], check=False)
+        restart_result = run_iqbus_job("restart")
         if restart_result.returncode != 0:
             print()
-            print(IQBUS_FAILED_MESSAGE)
+            print("Error: SDR server is already changing state. Wait for the current start/stop/restart job to finish.")
             return False
         if wait_for_iqbus_state("active") == "failed":
             report_failed_iqbus_service()
@@ -1113,10 +1117,10 @@ def restart_iqbus_if_not_inactive() -> bool:
 
 
 def start_iqbus_service() -> bool:
-    start_result = run_command(["systemctl", "start", "iqbus.service"], check=False)
+    start_result = run_iqbus_job("start")
     if start_result.returncode != 0:
         print()
-        print(IQBUS_FAILED_MESSAGE)
+        print("Error: SDR server is already changing state. Wait for the current start/stop/restart job to finish.")
         return False
     if wait_for_iqbus_state("active") == "failed":
         print()
@@ -1129,7 +1133,11 @@ def start_iqbus_service() -> bool:
 
 def stop_iqbus_service() -> None:
     report_failed_iqbus_service()
-    run_command(["systemctl", "stop", "iqbus.service"])
+    stop_result = run_iqbus_job("stop")
+    if stop_result.returncode != 0:
+        print()
+        print("Error: SDR server is already changing state. Wait for the current start/stop/restart job to finish.")
+        return
     if wait_for_iqbus_state("inactive") == "failed":
         print()
         print(IQBUS_FAILED_MESSAGE)
