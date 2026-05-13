@@ -726,6 +726,12 @@ def list_rtl_devices() -> list[RtlDevice]:
     for device in devices:
         device.serial = read_device_serial(device.index)
 
+    connected_usb_devices = list_connected_rtl_usb_devices()
+    if len(connected_usb_devices) == len(devices):
+        for device, usb_device in zip(devices, connected_usb_devices):
+            if not device.serial and usb_device.serial:
+                device.serial = usb_device.serial
+
     return devices
 
 
@@ -1192,18 +1198,30 @@ def read_iqbus_config() -> str:
 
 
 def configured_iqbus_device_is_present(config_text: str) -> bool:
-    configured_serial = (get_config_value(config_text, "device_serial") or "").strip().strip('"')
+    configured_serial = configured_iqbus_device_serial(config_text)
     configured_index = get_config_value(config_text, "device_index")
-    devices = list_rtl_devices()
+    connected_usb_devices = list_connected_rtl_usb_devices()
 
     if configured_serial:
-        return any(device.serial == configured_serial for device in devices)
+        matching_serial_devices = [
+            device for device in connected_usb_devices if device.serial == configured_serial
+        ]
+        if len(matching_serial_devices) == 1:
+            return True
+        if len(matching_serial_devices) > 1:
+            if configured_index is not None and configured_index.isdigit():
+                index = int(configured_index)
+                devices = list_rtl_devices()
+                return any(device.index == index and device.serial == configured_serial for device in devices)
+            return False
+        return False
 
     if configured_index is not None and configured_index.isdigit():
         index = int(configured_index)
+        devices = list_rtl_devices()
         return any(device.index == index for device in devices)
 
-    return bool(devices)
+    return bool(connected_usb_devices)
 
 
 def configured_iqbus_device_serial(config_text: str) -> str | None:
@@ -1382,6 +1400,12 @@ def switch_iqbus_device() -> None:
         [device.label() for device in devices],
     )
     selected_device = devices[selection]
+
+    refreshed_devices = list_rtl_devices()
+    for device in refreshed_devices:
+        if device.index == selected_device.index:
+            selected_device = device
+            break
 
     updated_config = update_config_value(config_text, "device_index", str(selected_device.index))
     if selected_device.serial:
