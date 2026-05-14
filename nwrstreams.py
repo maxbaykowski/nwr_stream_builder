@@ -2588,8 +2588,8 @@ def normalize_stream_settings(values: dict[str, object] | None = None) -> dict[s
             settings[key] = default_value
 
     settings["audio_volume"] = max(0.0, min(2.0, float(settings["audio_volume"])))
-    settings["audio_low_pass"] = max(1000.0, min(4000.0, float(settings["audio_low_pass"])))
-    settings["audio_high_pass"] = max(0.0, min(200.0, float(settings["audio_high_pass"])))
+    settings["audio_low_pass"] = max(1000.0, min(8000.0, float(settings["audio_low_pass"])))
+    settings["audio_high_pass"] = max(0.0, min(500.0, float(settings["audio_high_pass"])))
     settings["fallback_delay"] = max(30.0, min(120.0, float(settings["fallback_delay"])))
     return settings
 
@@ -3232,11 +3232,11 @@ def audio_settings_menu(callsign_lower: str) -> None:
             set_stream_audio_setting(callsign_lower, "audio_volume", value)
             print(f"Audio volume set to {format_audio_float(value)}.")
         elif selection == 1:
-            value = prompt_audio_frequency("Audio low pass", settings["audio_low_pass"], 1000, 4000)
+            value = prompt_audio_frequency("Audio low pass", settings["audio_low_pass"], 1000, 8000)
             set_stream_audio_setting(callsign_lower, "audio_low_pass", value)
             print(f"Audio low pass set to {int(value)} Hz.")
         elif selection == 2:
-            value = prompt_audio_frequency("Audio high pass", settings["audio_high_pass"], 0, 200)
+            value = prompt_audio_frequency("Audio high pass", settings["audio_high_pass"], 0, 500)
             set_stream_audio_setting(callsign_lower, "audio_high_pass", value)
             print(f"Audio high pass set to {int(value)} Hz.")
         elif selection == 3:
