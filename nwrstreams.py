@@ -2788,12 +2788,14 @@ def ensure_stream_liquidsoap_controls(callsign_lower: str) -> bool:
             and 'fallback_delay = interactive.float(' in config_text
             and 'audio_low_pass_q = interactive.float(' in config_text
             and 'audio_high_pass_q = interactive.float(' in config_text
+            and re.search(r"^deemphasis_time_constant\s*=\s*\d+\s*$", config_text, re.MULTILINE) is not None
             and re.search(r"^eas_pre_seconds\s*=\s*\d+\s*$", config_text, re.MULTILINE) is not None
             and re.search(r"^eas_post_seconds\s*=\s*\d+\s*$", config_text, re.MULTILINE) is not None
             and re.search(r"^eas_max_seconds\s*=\s*\d+\s*$", config_text, re.MULTILINE) is not None
             and 'radio = mksafe(radio)' in config_text
             and 'blank.strip(max_blank=fallback_delay, track_sensitive=false, radio)' in config_text
             and '| csdr dcblock |' in config_text
+            and '#{deemphasis_time_constant}' in config_text
             and 'q=audio_low_pass_q' in config_text
             and 'q=audio_high_pass_q' in config_text
         )
