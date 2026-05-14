@@ -3120,7 +3120,7 @@ def set_stream_alsa_output_enabled(callsign_lower: str, enabled: bool) -> None:
     restart_stream_service(callsign_lower)
     state = "enabled" if enabled else "disabled"
     print()
-    print(f"Default sound card monitor {state} and stream restarted.")
+    print(f"Default sound card monitor {state}.")
 
 
 def prompt_audio_volume(current_value: float) -> float:
@@ -3362,7 +3362,7 @@ def stream_server_settings_menu(callsign_lower: str) -> None:
     host, port = endpoint
     set_stream_server_endpoint(callsign_lower, host, port)
     print()
-    print(f"Stream server set to {host}:{port} and stream restarted.")
+    print(f"Stream server set to {host}:{port}.")
 
 
 def set_stream_eas_recording_enabled(callsign_lower: str, enabled: bool) -> None:
@@ -3384,7 +3384,7 @@ def set_stream_eas_recording_enabled(callsign_lower: str, enabled: bool) -> None
     restart_stream_service(callsign_lower)
     state = "enabled" if enabled else "disabled"
     print()
-    print(f"EAS recording {state} and stream restarted.")
+    print(f"EAS recording {state}.")
 
 
 def export_stream_eas_recordings(callsign_lower: str) -> None:
@@ -3459,15 +3459,15 @@ def eas_recording_settings_menu(callsign_lower: str) -> None:
         if selection == 0:
             value = prompt_eas_buffer_seconds("EAS pre seconds", settings["eas_pre_seconds"])
             set_stream_eas_timing_setting(callsign_lower, "eas_pre_seconds", value)
-            print(f"EAS pre seconds set to {value} and stream restarted.")
+            print(f"EAS pre seconds set to {value}.")
         elif selection == 1:
             value = prompt_eas_buffer_seconds("EAS post seconds", settings["eas_post_seconds"])
             set_stream_eas_timing_setting(callsign_lower, "eas_post_seconds", value)
-            print(f"EAS post seconds set to {value} and stream restarted.")
+            print(f"EAS post seconds set to {value}.")
         elif selection == 2:
             value = prompt_eas_max_seconds(settings["eas_max_seconds"])
             set_stream_eas_timing_setting(callsign_lower, "eas_max_seconds", value)
-            print(f"EAS max seconds set to {value} and stream restarted.")
+            print(f"EAS max seconds set to {value}.")
         elif selection == 3:
             export_stream_eas_recordings(callsign_lower)
         elif selection == 4:
