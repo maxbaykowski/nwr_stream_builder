@@ -82,7 +82,9 @@ STREAM_SOCKET_NAME = "liquidsoap.sock"
 STREAM_VARIABLES_FILE_NAME = "variables.json"
 DEFAULT_AUDIO_VOLUME = 1.0
 DEFAULT_AUDIO_LOW_PASS = 3000.0
+DEFAULT_AUDIO_LOW_PASS_Q = 1.0
 DEFAULT_AUDIO_HIGH_PASS = 0.0
+DEFAULT_AUDIO_HIGH_PASS_Q = 1.0
 DEFAULT_FALLBACK_DELAY = 30.0
 DEFAULT_EAS_PRE_SECONDS = 10
 DEFAULT_EAS_POST_SECONDS = 10
@@ -2565,7 +2567,9 @@ def default_stream_settings() -> dict[str, float | int]:
     return {
         "audio_volume": DEFAULT_AUDIO_VOLUME,
         "audio_low_pass": DEFAULT_AUDIO_LOW_PASS,
+        "audio_low_pass_q": DEFAULT_AUDIO_LOW_PASS_Q,
         "audio_high_pass": DEFAULT_AUDIO_HIGH_PASS,
+        "audio_high_pass_q": DEFAULT_AUDIO_HIGH_PASS_Q,
         "fallback_delay": DEFAULT_FALLBACK_DELAY,
     }
 
@@ -2589,7 +2593,9 @@ def normalize_stream_settings(values: dict[str, object] | None = None) -> dict[s
 
     settings["audio_volume"] = max(0.0, min(2.0, float(settings["audio_volume"])))
     settings["audio_low_pass"] = max(1000.0, min(8000.0, float(settings["audio_low_pass"])))
+    settings["audio_low_pass_q"] = max(0.5, min(3.0, float(settings["audio_low_pass_q"])))
     settings["audio_high_pass"] = max(0.0, min(500.0, float(settings["audio_high_pass"])))
+    settings["audio_high_pass_q"] = max(0.5, min(3.0, float(settings["audio_high_pass_q"])))
     settings["fallback_delay"] = max(30.0, min(120.0, float(settings["fallback_delay"])))
     return settings
 
@@ -2601,7 +2607,9 @@ def liquidsoap_persistent_variables_payload(settings: dict[str, float | int]) ->
         "float": [
             ["audio_volume", float(normalized["audio_volume"])],
             ["audio_low_pass", float(normalized["audio_low_pass"])],
+            ["audio_low_pass_q", float(normalized["audio_low_pass_q"])],
             ["audio_high_pass", float(normalized["audio_high_pass"])],
+            ["audio_high_pass_q", float(normalized["audio_high_pass_q"])],
             ["fallback_delay", float(normalized["fallback_delay"])],
         ],
         "int": [],
@@ -2778,12 +2786,16 @@ def ensure_stream_liquidsoap_controls(callsign_lower: str) -> bool:
             and 'interactive.persistent(variables_path)' in config_text
             and 'audio_volume = interactive.float(' in config_text
             and 'fallback_delay = interactive.float(' in config_text
+            and 'audio_low_pass_q = interactive.float(' in config_text
+            and 'audio_high_pass_q = interactive.float(' in config_text
             and re.search(r"^eas_pre_seconds\s*=\s*\d+\s*$", config_text, re.MULTILINE) is not None
             and re.search(r"^eas_post_seconds\s*=\s*\d+\s*$", config_text, re.MULTILINE) is not None
             and re.search(r"^eas_max_seconds\s*=\s*\d+\s*$", config_text, re.MULTILINE) is not None
             and 'radio = mksafe(radio)' in config_text
             and 'blank.strip(max_blank=fallback_delay, track_sensitive=false, radio)' in config_text
             and '| csdr dcblock |' in config_text
+            and 'q=audio_low_pass_q' in config_text
+            and 'q=audio_high_pass_q' in config_text
         )
 
     if config_ready:
@@ -3150,6 +3162,20 @@ def prompt_audio_frequency(label: str, current_value: float, minimum: int, maxim
         return float(parsed)
 
 
+def prompt_audio_q_value(label: str, current_value: float) -> float:
+    while True:
+        value = prompt_text(f"{label}: ", format_audio_float(current_value)).strip()
+        try:
+            parsed = float(value)
+        except ValueError:
+            print(f"Enter {label.lower()} as a number between 0.5 and 3.0.")
+            continue
+        if not 0.5 <= parsed <= 3.0:
+            print(f"{label} must be between 0.5 and 3.0.")
+            continue
+        return parsed
+
+
 def prompt_fallback_delay(current_value: float) -> float:
     while True:
         value = prompt_text("Fallback delay (seconds): ", str(int(round(current_value)))).strip()
@@ -3220,7 +3246,17 @@ def audio_settings_menu(callsign_lower: str) -> None:
             [
                 f"Audio Volume: {format_audio_float(settings['audio_volume'])} (sets playback level)",
                 f"Audio Low Pass: {int(round(settings['audio_low_pass']))} Hz (cuts higher audio frequencies)",
+                (
+                    f"Audio Low Pass Q: {format_audio_float(settings['audio_low_pass_q'])} "
+                    "(controls the filter sharpness near the cutoff frequency. Lower values produce a sharper, "
+                    "more resonant cutoff, higher values sound smoother and more gradual)"
+                ),
                 f"Audio High Pass: {int(round(settings['audio_high_pass']))} Hz (cuts lower audio frequencies)",
+                (
+                    f"Audio High Pass Q: {format_audio_float(settings['audio_high_pass_q'])} "
+                    "(controls the filter sharpness near the cutoff frequency. Lower values produce a sharper, "
+                    "more resonant cutoff, higher values sound smoother and more gradual)"
+                ),
                 f"Fallback Delay: {int(round(settings['fallback_delay']))} seconds (wait before switching to fallback audio)",
             ],
             "Back to stream menu",
@@ -3236,10 +3272,18 @@ def audio_settings_menu(callsign_lower: str) -> None:
             set_stream_audio_setting(callsign_lower, "audio_low_pass", value)
             print(f"Audio low pass set to {int(value)} Hz.")
         elif selection == 2:
+            value = prompt_audio_q_value("Audio low pass Q", settings["audio_low_pass_q"])
+            set_stream_audio_setting(callsign_lower, "audio_low_pass_q", value)
+            print(f"Audio low pass Q set to {format_audio_float(value)}.")
+        elif selection == 3:
             value = prompt_audio_frequency("Audio high pass", settings["audio_high_pass"], 0, 500)
             set_stream_audio_setting(callsign_lower, "audio_high_pass", value)
             print(f"Audio high pass set to {int(value)} Hz.")
-        elif selection == 3:
+        elif selection == 4:
+            value = prompt_audio_q_value("Audio high pass Q", settings["audio_high_pass_q"])
+            set_stream_audio_setting(callsign_lower, "audio_high_pass_q", value)
+            print(f"Audio high pass Q set to {format_audio_float(value)}.")
+        elif selection == 5:
             value = prompt_fallback_delay(settings["fallback_delay"])
             set_stream_audio_setting(callsign_lower, "fallback_delay", value)
             print(f"Fallback delay set to {int(value)} seconds.")
