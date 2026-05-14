@@ -2002,26 +2002,26 @@ def build_output_options(output: IcecastOutput, station: dict[str, str] | None =
     provider = output_provider(output, station)
     options = []
     if provider == "custom":
-        options.append(f"Server: {output.server or '(blank)'}")
-        options.append(f"Port: {output.port or '(blank)'}")
-        options.append(f"Username: {output.username or '(blank)'}")
+        options.append(f"Server: {output.server or '(blank)'} (Icecast server address)")
+        options.append(f"Port: {output.port or '(blank)'} (Icecast server port)")
+        options.append(f"Username: {output.username or '(blank)'} (Icecast source username)")
     elif provider == "gwes":
-        options.append(f"Username: {output.username or '(blank)'}")
+        options.append(f"Username: {output.username or '(blank)'} (GWES source username)")
     elif provider == "noaa_radio_org":
-        options.append(f"Mountpoint: {output.mountpoint or '(blank)'}")
+        options.append(f"Mountpoint: {output.mountpoint or '(blank)'} (Stream mountpoint on the server)")
         if output_fields_complete(output):
-            options.append("Confirm")
+            options.append("Confirm (test credentials and save changes)")
         return options
     else:
         pass
     options.extend(
         [
-            f"Password: {'*' * len(output.password) if output.password else '(blank)'}",
-            f"Mountpoint: {output.mountpoint or '(blank)'}",
+            f"Password: {'*' * len(output.password) if output.password else '(blank)'} (Icecast source password)",
+            f"Mountpoint: {output.mountpoint or '(blank)'} (Stream mountpoint on the server)",
         ]
     )
     if output_fields_complete(output):
-        options.append("Confirm")
+        options.append("Confirm (test credentials and save changes)")
     return options
 
 
@@ -2180,10 +2180,10 @@ def prompt_icecast_output(station: dict[str, str] | None) -> IcecastOutput | Non
         selection = prompt_menu_with_back(
             "Streaming Platform",
             [
-                "GWES Weather Radio",
-                "Weather USA",
-                "NOAA Weather Radio Org",
-                "Enter Credentials Manually",
+                "GWES Weather Radio (configure a GWES relay destination)",
+                "Weather USA (configure a Weather USA relay destination)",
+                "NOAA Weather Radio Org (configure a NOAA Weather Radio Org destination)",
+                "Enter Credentials Manually (configure a custom Icecast destination)",
             ],
             "Back to stream setup",
         )
@@ -3200,13 +3200,13 @@ def prompt_eas_buffer_seconds(label: str, current_value: int) -> int:
 
 def prompt_eas_max_seconds(current_value: int) -> int:
     while True:
-        value = prompt_text("EAS max seconds: ", str(current_value)).strip()
+        value = prompt_text("Max recording time: ", str(current_value)).strip()
         if not value.isdigit():
-            print("Enter EAS max seconds as a whole number of seconds.")
+            print("Enter max recording time as a whole number of seconds.")
             continue
         parsed = int(value)
         if not 1 <= parsed <= 600:
-            print("EAS max seconds must be between 1 and 600 seconds.")
+            print("Max recording time must be between 1 and 600 seconds.")
             continue
         return parsed
 
@@ -3218,10 +3218,10 @@ def audio_settings_menu(callsign_lower: str) -> None:
         selection = prompt_menu_with_back(
             "Audio Settings",
             [
-                f"Audio Volume: {format_audio_float(settings['audio_volume'])}",
-                f"Audio Low Pass: {int(round(settings['audio_low_pass']))} Hz",
-                f"Audio High Pass: {int(round(settings['audio_high_pass']))} Hz",
-                f"Fallback Delay: {int(round(settings['fallback_delay']))} seconds",
+                f"Audio Volume: {format_audio_float(settings['audio_volume'])} (sets playback level)",
+                f"Audio Low Pass: {int(round(settings['audio_low_pass']))} Hz (cuts higher audio frequencies)",
+                f"Audio High Pass: {int(round(settings['audio_high_pass']))} Hz (cuts lower audio frequencies)",
+                f"Fallback Delay: {int(round(settings['fallback_delay']))} seconds (wait before switching to fallback audio)",
             ],
             "Back to stream menu",
         )
@@ -3268,9 +3268,9 @@ def prompt_stream_server_endpoint(
         print()
         print("Stream server settings")
         print("0. Back")
-        print(f"1. IP address: {host}")
-        print(f"2. Port: {port}")
-        print("3. Confirm")
+        print(f"1. IP address: {host} (SDR server IP address or hostname)")
+        print(f"2. Port: {port} (TCP port used by sdr_server)")
+        print("3. Confirm (test SDR server connection and save changes)")
 
         while True:
             selection = input("Select an option: ").strip()
@@ -3329,8 +3329,8 @@ def prompt_stream_server_for_creation(station: dict[str, str]) -> tuple[str, int
     selection = prompt_menu_with_back(
         "SDR Server",
         [
-            "Use locally hosted SDR server",
-            "Enter server settings manually",
+            "Use locally hosted SDR server (use this machine's active iqbus service)",
+            "Enter server settings manually (connect this stream to another SDR server)",
         ],
         "Back to stream setup",
     )
@@ -3446,28 +3446,30 @@ def eas_recording_settings_menu(callsign_lower: str) -> None:
         selection = prompt_menu_with_back(
             "EAS recording settings",
             [
-                f"EAS pre seconds: {settings['eas_pre_seconds']}",
-                f"EAS post seconds: {settings['eas_post_seconds']}",
-                f"EAS max seconds: {settings['eas_max_seconds']}",
-                "Export EAS alerts",
-                "Disable recording" if enabled else "Enable recording",
+                f"Pre record time: {settings['eas_pre_seconds']} seconds (audio recorded before an alert)",
+                f"Post record time: {settings['eas_post_seconds']} seconds (audio recorded after an alert)",
+                f"Max recording time: {settings['eas_max_seconds']} seconds (recording limit if no EOM tones are received)",
+                "Export EAS alerts (copy saved alerts to your home directory)",
+                "Disable recording (stop saving EAS alerts for this stream)"
+                if enabled
+                else "Enable recording (start saving EAS alerts for this stream)",
             ],
             "Back to stream menu",
         )
         if selection == -1:
             return
         if selection == 0:
-            value = prompt_eas_buffer_seconds("EAS pre seconds", settings["eas_pre_seconds"])
+            value = prompt_eas_buffer_seconds("Pre record time", settings["eas_pre_seconds"])
             set_stream_eas_timing_setting(callsign_lower, "eas_pre_seconds", value)
-            print(f"EAS pre seconds set to {value}.")
+            print(f"Pre record time set to {value} seconds.")
         elif selection == 1:
-            value = prompt_eas_buffer_seconds("EAS post seconds", settings["eas_post_seconds"])
+            value = prompt_eas_buffer_seconds("Post record time", settings["eas_post_seconds"])
             set_stream_eas_timing_setting(callsign_lower, "eas_post_seconds", value)
-            print(f"EAS post seconds set to {value}.")
+            print(f"Post record time set to {value} seconds.")
         elif selection == 2:
             value = prompt_eas_max_seconds(settings["eas_max_seconds"])
             set_stream_eas_timing_setting(callsign_lower, "eas_max_seconds", value)
-            print(f"EAS max seconds set to {value}.")
+            print(f"Max recording time set to {value} seconds.")
         elif selection == 3:
             export_stream_eas_recordings(callsign_lower)
         elif selection == 4:
@@ -3484,12 +3486,12 @@ def edit_output_menu(
         print()
         print("Edit Output")
         print("0. Back")
-        options = ["Icecast credentials"]
+        options = ["Icecast credentials (edit server login details and test them)"]
         bitrate_index = None
         if output_bitrate_editable(output, station):
-            options.append(f"Bitrate: {output.bitrate or '(blank)'} kbps")
+            options.append(f"Bitrate: {output.bitrate or '(blank)'} kbps (stream encoding bitrate)")
             bitrate_index = len(options)
-        options.append("Remove Output")
+        options.append("Remove Output (delete this Icecast destination)")
         remove_index = len(options)
         for index, option in enumerate(options, start=1):
             print(f"{index}. {option}")
@@ -3535,11 +3537,11 @@ def outputs_menu(callsign_lower: str, station: dict[str, str] | None) -> None:
         parsed_outputs = extract_liquidsoap_icecast_outputs(read_stream_config(callsign_lower))
         options = [output_menu_label(parsed.output) for parsed in parsed_outputs]
         options.append(
-            "Disable default sound card monitor"
+            "Disable default sound card monitor (stop sending audio to the default ALSA device)"
             if alsa_enabled
-            else "Enable default sound card monitor"
+            else "Enable default sound card monitor (send audio to the default ALSA device)"
         )
-        options.append("Add output")
+        options.append("Add output (add another Icecast destination for this stream)")
         selection = prompt_menu_with_back("Outputs", options, "Back to stream menu")
         if selection == -1:
             return
@@ -3570,15 +3572,15 @@ def stream_menu(callsign: str) -> None:
         start_on_boot = service_starts_on_boot(service_name)
         server_host, server_port = read_stream_server_settings(callsign_lower)
         options = [
-            "Outputs",
-            f"Server: {server_host}:{server_port}",
-            "Audio settings",
-            "Stop Stream" if stream_running else "Start Stream",
-            f"Start Stream On Host Boot: {'on' if start_on_boot else 'off'}",
-            "Delete Stream",
+            "Outputs (manage Icecast destinations and sound card monitoring)",
+            f"Server: {server_host}:{server_port} (SDR server this stream connects to)",
+            "Audio settings (adjust filters, volume, and fallback timing)",
+            "Stop Stream (stop this stream service)" if stream_running else "Start Stream (start this stream service)",
+            f"Start Stream On Host Boot: {'on' if start_on_boot else 'off'} (toggle automatic stream startup)",
+            "Delete Stream (remove this stream and its configuration)",
         ]
         if eas_recording_available():
-            options.insert(3, "EAS recording settings")
+            options.insert(3, "EAS recording settings (control alert recording behavior)")
         selection = prompt_menu_with_back("Manage Stream", options, "Back to streams")
         if selection == -1:
             return
