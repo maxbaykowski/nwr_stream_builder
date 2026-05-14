@@ -1360,30 +1360,59 @@ def is_valid_sample_rate(value: int) -> bool:
     )
 
 
-def prompt_for_sample_rate(current_value: int | None) -> int:
+def supported_sample_rates() -> list[int]:
+    rates: list[int] = []
+    for value in range(48000, HIGH_SAMPLE_RATE_MAX + 1, 48000):
+        if is_valid_sample_rate(value):
+            rates.append(value)
+    return rates
+
+
+def prompt_for_sample_rate(current_value: int | None) -> int | None:
+    rates = supported_sample_rates()
+    show_additional = current_value is not None and current_value > USB_WARNING_SAMPLE_RATE
+
     while True:
-        print()
-        print("RTL Sample Rate")
-        print("Controls the SDR band sampling rate used by sdr_server.")
-        if current_value is not None:
-            print(f"Current value: {current_value}")
-        print(
-            "Valid ranges: "
-            f"{LOW_SAMPLE_RATE_MIN}-{LOW_SAMPLE_RATE_MAX} or "
-            f"{HIGH_SAMPLE_RATE_MIN}-{HIGH_SAMPLE_RATE_MAX} samples/second."
+        visible_rates = [
+            rate for rate in rates
+            if show_additional or rate <= USB_WARNING_SAMPLE_RATE
+        ]
+        toggle_label = (
+            "Hide additional sample rates"
+            if show_additional
+            else "Show additional sample rates"
         )
 
-        prefill = str(current_value) if current_value is not None else ""
-        value = prompt_with_prefill("Enter a new sample rate: ", prefill).strip()
-        if not value.isdigit():
-            print("Enter the sample rate as a whole number.")
-            continue
+        print()
+        print("RTL Sample Rate")
+        print("0. Back to server settings")
+        for index, rate in enumerate(visible_rates, start=1):
+            label = f"{rate} samples/second"
+            if rate == current_value:
+                label += " (current)"
+            print(f"{index}. {label}")
+        toggle_index = len(visible_rates) + 1
+        print(f"{toggle_index}. {toggle_label}")
 
-        sample_rate = int(value)
-        if is_valid_sample_rate(sample_rate):
-            return sample_rate
+        while True:
+            selection = input("Select an option: ").strip()
+            if not selection.isdigit():
+                print("Enter the number for the option you want.")
+                continue
 
-        print("That sample rate is outside the supported RTL-SDR ranges.")
+            selected_index = int(selection)
+            if selected_index == 0:
+                clear_console()
+                return None
+            if 1 <= selected_index <= len(visible_rates):
+                clear_console()
+                return visible_rates[selected_index - 1]
+            if selected_index == toggle_index:
+                clear_console()
+                show_additional = not show_additional
+                break
+
+            print("That selection is not available.")
 
 
 def confirm_high_sample_rate(sample_rate: int) -> bool:
@@ -1403,6 +1432,8 @@ def configure_sample_rate() -> None:
     current_sample_rate = int(current_value) if current_value and current_value.isdigit() else None
 
     sample_rate = prompt_for_sample_rate(current_sample_rate)
+    if sample_rate is None:
+        return
     if not confirm_high_sample_rate(sample_rate):
         print()
         print("Sample rate was not changed.")
