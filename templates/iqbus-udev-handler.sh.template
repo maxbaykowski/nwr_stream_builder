@@ -6,6 +6,8 @@ CONFIG="/etc/iqbus.config"
 LOCK_FILE="/run/iqbus-udev.lock"
 RETRY_COUNT=20
 RETRY_DELAY=0.5
+INITIAL_DELAY=0.5
+POST_DETECT_DELAY=1.0
 
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
@@ -19,6 +21,8 @@ fi
 if ! command -v lsusb >/dev/null 2>&1; then
   exit 0
 fi
+
+sleep "$INITIAL_DELAY"
 
 configured_serial() {
   if [ ! -f "$CONFIG" ]; then
@@ -62,6 +66,7 @@ rtl_present() {
 
 for _ in $(seq 1 "$RETRY_COUNT"); do
   if rtl_present; then
+    sleep "$POST_DETECT_DELAY"
     state="$(systemctl is-active "$SERVICE" 2>/dev/null || true)"
     if [ "$state" = "activating" ] || [ "$state" = "deactivating" ] || [ "$state" = "reloading" ]; then
       exit 0
